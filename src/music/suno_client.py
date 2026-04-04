@@ -83,7 +83,8 @@ class SunoClient:
                 "title": f"Musical Box #{self.call_count + 1}",
                 "customMode": True,
                 "instrumental": True,
-                "wait_audio": False,
+                "model": "V4",
+                "callBackUrl": "https://example.com/callback",
             },
         )
         response.raise_for_status()
@@ -116,8 +117,8 @@ class SunoClient:
     async def poll_for_audio(
         self,
         task_id: str,
-        max_attempts: int = 60,
-        interval_sec: float = 5.0,
+        max_attempts: int = 30,
+        interval_sec: float = 10.0,
     ) -> str:
         """Poll the API until the song is ready or timeout."""
         for attempt in range(max_attempts):
@@ -131,13 +132,16 @@ class SunoClient:
             response.raise_for_status()
             data = response.json()
 
-            records = data.get("data", {}).get("response", {}).get("sunoData", [])
+            resp_data = data.get("data") or {}
+            response_obj = resp_data.get("response") or {}
+            records = response_obj.get("sunoData") or []
             if records and records[0].get("audioUrl"):
                 audio_url = records[0]["audioUrl"]
-                logger.info("[SUNO] Song ready after %d polls: %s", attempt + 1, audio_url)
+                duration = records[0].get("duration", 60.0)
+                logger.info("[SUNO] Song ready after %d polls (%.0fs): %s", attempt + 1, duration, audio_url)
                 return audio_url
 
-            status = data.get("data", {}).get("status", "unknown")
+            status = resp_data.get("status", "unknown")
             logger.info("[SUNO] Poll %d/%d — status: %s", attempt + 1, max_attempts, status)
 
         logger.error("[SUNO] Timeout after %d polls for task %s", max_attempts, task_id)
