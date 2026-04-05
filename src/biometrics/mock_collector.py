@@ -110,6 +110,15 @@ class MockCollector:
         spo2 = 97 + self.rng.normal(0, 0.8)
         temp = 36.2 + 0.3 * math.sin(t / 300) + self.rng.normal(0, 0.1)
 
+        # Raw PPG: simulated 16-bit value oscillating with heartbeat
+        raw_ppg = 2000 + int(500 * math.sin(2 * math.pi * hr / 60 * t) + self.rng.normal(0, 50))
+
+        # Accelerometer: baseline tremor + event-correlated movement
+        movement_scale = 0.1 + event_spike / 30.0
+        accel_x = float(self.rng.normal(0, movement_scale))
+        accel_y = float(self.rng.normal(0, movement_scale))
+        accel_z = float(1.0 + self.rng.normal(0, movement_scale * 0.5))
+
         return BiometricReading(
             person_id=1,
             timestamp=now,
@@ -117,6 +126,10 @@ class MockCollector:
             spo2=int(round(spo2)),
             temperature=round(float(temp), 1),
             hrv=int(round(hrv)),
+            raw_ppg=max(0, min(4095, raw_ppg)),
+            accel_x=round(accel_x, 3),
+            accel_y=round(accel_y, 3),
+            accel_z=round(accel_z, 3),
         )
 
     def generate_person2(
@@ -136,6 +149,13 @@ class MockCollector:
         spo2 = 97.5 + self.rng.normal(0, 0.7)
         temp = 36.4 + 0.25 * math.sin(t / 280 + 0.5) + self.rng.normal(0, 0.12)
 
+        raw_ppg = 2100 + int(450 * math.sin(2 * math.pi * hr / 60 * t + 0.5) + self.rng.normal(0, 60))
+
+        movement_scale = 0.12 + event_spike / 25.0
+        accel_x = float(self.rng.normal(0, movement_scale))
+        accel_y = float(self.rng.normal(0, movement_scale))
+        accel_z = float(1.0 + self.rng.normal(0, movement_scale * 0.5))
+
         return BiometricReading(
             person_id=2,
             timestamp=now,
@@ -143,4 +163,8 @@ class MockCollector:
             spo2=int(round(spo2)),
             temperature=round(float(temp), 1),
             hrv=int(round(hrv)),
+            raw_ppg=max(0, min(4095, raw_ppg)),
+            accel_x=round(accel_x, 3),
+            accel_y=round(accel_y, 3),
+            accel_z=round(accel_z, 3),
         )

@@ -81,20 +81,23 @@ class Pipeline:
             logger.info("Prompt: %s", prompt)
             logger.info("Style: %s", style)
             logger.info(
-                "Biometrics: arousal=%.2f valence=%.2f sync=%.2f | "
-                "P1(HR=%.0f SpO2=%.0f T=%.1f HRV=%.0f) "
-                "P2(HR=%.0f SpO2=%.0f T=%.1f HRV=%.0f)",
+                "Biometrics: arousal=%.2f valence=%.2f sync=%.2f movement=%.2f | "
+                "P1(HR=%.0f SpO2=%.0f T=%.1f HRV=%.0f Accel=%.2f) "
+                "P2(HR=%.0f SpO2=%.0f T=%.1f HRV=%.0f Accel=%.2f)",
                 snapshot.combined_arousal,
                 snapshot.combined_valence,
                 snapshot.synchrony_score,
+                snapshot.movement_intensity,
                 snapshot.person1.avg_hr,
                 snapshot.person1.avg_spo2,
                 snapshot.person1.avg_temperature,
                 snapshot.person1.avg_hrv,
+                snapshot.person1.avg_accel_magnitude,
                 snapshot.person2.avg_hr,
                 snapshot.person2.avg_spo2,
                 snapshot.person2.avg_temperature,
                 snapshot.person2.avg_hrv,
+                snapshot.person2.avg_accel_magnitude,
             )
 
             song = await self.suno_client.generate(prompt, style)

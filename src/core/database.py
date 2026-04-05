@@ -60,8 +60,8 @@ class Database:
         async with self.get_connection() as conn:
             await conn.execute(
                 """INSERT INTO biometric_readings
-                   (session_id, person_id, timestamp, heart_rate, spo2, temperature, hrv)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                   (session_id, person_id, timestamp, heart_rate, spo2, temperature, hrv, raw_ppg, accel_x, accel_y, accel_z)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (
                     session_id,
                     reading.person_id,
@@ -70,6 +70,10 @@ class Database:
                     reading.spo2,
                     reading.temperature,
                     reading.hrv,
+                    reading.raw_ppg,
+                    reading.accel_x,
+                    reading.accel_y,
+                    reading.accel_z,
                 ),
             )
 
@@ -105,7 +109,7 @@ class Database:
     ) -> list[BiometricReading]:
         """Get readings from the last N seconds, optionally filtered by person."""
         query = """
-            SELECT person_id, timestamp, heart_rate, spo2, temperature, hrv
+            SELECT person_id, timestamp, heart_rate, spo2, temperature, hrv, raw_ppg, accel_x, accel_y, accel_z
             FROM biometric_readings
             WHERE session_id = %s
               AND timestamp >= NOW() - INTERVAL '%s seconds'
@@ -130,6 +134,10 @@ class Database:
                         spo2=row["spo2"],
                         temperature=row["temperature"],
                         hrv=row["hrv"],
+                        raw_ppg=row["raw_ppg"],
+                        accel_x=row["accel_x"],
+                        accel_y=row["accel_y"],
+                        accel_z=row["accel_z"],
                     )
                     for row in rows
                 ]

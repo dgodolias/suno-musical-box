@@ -15,7 +15,11 @@ CREATE TABLE IF NOT EXISTS biometric_readings (
     heart_rate SMALLINT,
     spo2 SMALLINT,
     temperature REAL,
-    hrv SMALLINT
+    hrv SMALLINT,
+    raw_ppg SMALLINT,
+    accel_x REAL,
+    accel_y REAL,
+    accel_z REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_readings_session_ts

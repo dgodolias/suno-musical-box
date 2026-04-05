@@ -17,6 +17,10 @@ class BiometricReading(BaseModel):
     spo2: int | None = None
     temperature: float | None = None
     hrv: int | None = None
+    raw_ppg: int | None = None
+    accel_x: float | None = None
+    accel_y: float | None = None
+    accel_z: float | None = None
 
     @field_validator("heart_rate", mode="before")
     @classmethod
@@ -54,6 +58,7 @@ class BiometricAverages(BaseModel):
     avg_spo2: float
     avg_temperature: float
     avg_hrv: float
+    avg_accel_magnitude: float  # sqrt(x^2+y^2+z^2), movement intensity
     sample_count: int
 
 
@@ -67,3 +72,4 @@ class BiometricSnapshot(BaseModel):
     combined_arousal: float  # 0-1 scale
     combined_valence: float  # 0-1 scale
     synchrony_score: float  # 0-1, how similar the two people are
+    movement_intensity: float  # 0-1, how much physical movement

@@ -1,5 +1,6 @@
 """Pure utility functions. No state, no side effects."""
 
+import math
 from datetime import datetime, timezone
 
 from src.biometrics.models import BiometricAverages, BiometricReading, BiometricSnapshot
@@ -17,6 +18,33 @@ def normalize(value: float, min_val: float, max_val: float) -> float:
     return clamp((value - min_val) / (max_val - min_val), 0.0, 1.0)
 
 
+def accel_magnitude(x: float, y: float, z: float) -> float:
+    """Compute acceleration magnitude from 3-axis values."""
+    return math.sqrt(x * x + y * y + z * z)
+
+
+def compute_hrv_from_ppg(readings: list[BiometricReading]) -> float:
+    """Estimate HRV (RMSSD-like) from consecutive HR readings.
+
+    Uses beat-to-beat interval differences derived from BPM values.
+    Real HRV would use raw PPG peak-to-peak intervals; this is a
+    simplified approximation using 1Hz HR samples.
+    """
+    hr_values = [r.heart_rate for r in readings if r.heart_rate is not None]
+    if len(hr_values) < 3:
+        return 60.0
+
+    # Convert BPM to approximate RR intervals (ms)
+    rr_intervals = [60000.0 / hr for hr in hr_values if hr > 0]
+    if len(rr_intervals) < 3:
+        return 60.0
+
+    # RMSSD: root mean square of successive differences
+    diffs_sq = [(rr_intervals[i + 1] - rr_intervals[i]) ** 2 for i in range(len(rr_intervals) - 1)]
+    rmssd = math.sqrt(sum(diffs_sq) / len(diffs_sq))
+    return clamp(rmssd, 15.0, 150.0)
+
+
 def compute_averages(readings: list[BiometricReading]) -> BiometricAverages:
     """Compute average biometrics from a list of readings for one person."""
     hr_values = [r.heart_rate for r in readings if r.heart_rate is not None]
@@ -24,11 +52,22 @@ def compute_averages(readings: list[BiometricReading]) -> BiometricAverages:
     temp_values = [r.temperature for r in readings if r.temperature is not None]
     hrv_values = [r.hrv for r in readings if r.hrv is not None]
 
+    # Compute HRV from HR intervals if no native HRV available
+    avg_hrv = sum(hrv_values) / len(hrv_values) if hrv_values else compute_hrv_from_ppg(readings)
+
+    # Compute average acceleration magnitude
+    accel_mags = [
+        accel_magnitude(r.accel_x, r.accel_y, r.accel_z)
+        for r in readings
+        if r.accel_x is not None and r.accel_y is not None and r.accel_z is not None
+    ]
+
     return BiometricAverages(
         avg_hr=sum(hr_values) / len(hr_values) if hr_values else 70.0,
         avg_spo2=sum(spo2_values) / len(spo2_values) if spo2_values else 97.0,
         avg_temperature=sum(temp_values) / len(temp_values) if temp_values else 36.5,
-        avg_hrv=sum(hrv_values) / len(hrv_values) if hrv_values else 60.0,
+        avg_hrv=avg_hrv,
+        avg_accel_magnitude=sum(accel_mags) / len(accel_mags) if accel_mags else 0.0,
         sample_count=len(readings),
     )
 
@@ -54,8 +93,16 @@ def compute_snapshot(
     combined_hrv = (avg1.avg_hrv + avg2.avg_hrv) / 2
     synchrony = compute_synchrony(avg1, avg2)
 
-    # Arousal: high HR + low HRV = high arousal
-    arousal = normalize(combined_hr, 55.0, 135.0) * 0.6 + (1.0 - normalize(combined_hrv, 15.0, 150.0)) * 0.4
+    # Movement intensity: normalized acceleration (0 = still, 1 = very active)
+    combined_accel = (avg1.avg_accel_magnitude + avg2.avg_accel_magnitude) / 2
+    movement = normalize(combined_accel, 0.0, 2.0)
+
+    # Arousal: high HR + low HRV + high movement = high arousal
+    arousal = (
+        normalize(combined_hr, 55.0, 135.0) * 0.4
+        + (1.0 - normalize(combined_hrv, 15.0, 150.0)) * 0.3
+        + movement * 0.3
+    )
 
     # Valence: high temp + high SpO2 + high synchrony = positive valence
     combined_temp = (avg1.avg_temperature + avg2.avg_temperature) / 2
@@ -75,4 +122,5 @@ def compute_snapshot(
         combined_arousal=round(arousal, 3),
         combined_valence=round(valence, 3),
         synchrony_score=round(synchrony, 3),
+        movement_intensity=round(movement, 3),
     )

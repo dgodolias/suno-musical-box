@@ -84,6 +84,19 @@ def map_complexity(hrv_norm: float) -> str:
     return "complex layered evolving progressions"
 
 
+def map_rhythm(movement: float) -> str:
+    """Map movement intensity [0-1] to rhythmic texture description."""
+    if movement < 0.2:
+        return "still and spacious with minimal percussion"
+    if movement < 0.4:
+        return "gentle subtle rhythmic pulse"
+    if movement < 0.6:
+        return "steady grooving rhythm"
+    if movement < 0.8:
+        return "driving percussive beat"
+    return "intense pounding rhythm with powerful drums"
+
+
 def build_prompt(snapshot: BiometricSnapshot) -> tuple[str, str]:
     """Build a Suno prompt + style tag from a biometric snapshot.
 
@@ -102,19 +115,23 @@ def build_prompt(snapshot: BiometricSnapshot) -> tuple[str, str]:
     temp_norm = normalize(avg_temp, 35.5, 37.5)
     hrv_norm = normalize(avg_hrv, 15.0, 150.0)
 
+    movement = snapshot.movement_intensity
+
     genre = map_genre(arousal, valence)
     tempo = map_tempo(arousal)
     mood = map_mood(valence)
     instruments = map_instruments(spo2_norm, temp_norm)
     harmony = map_harmony(synchrony)
     complexity = map_complexity(hrv_norm)
+    rhythm = map_rhythm(movement)
 
     prompt = (
         f"A {genre} instrumental song that is {tempo}. "
         f"{mood.capitalize()}. "
         f"{instruments.capitalize()}. "
         f"{harmony.capitalize()}. "
-        f"{complexity.capitalize()}."
+        f"{complexity.capitalize()}. "
+        f"{rhythm.capitalize()}."
     )
 
     return prompt, genre
