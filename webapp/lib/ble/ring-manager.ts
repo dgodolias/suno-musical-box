@@ -11,16 +11,20 @@ import {
   RealTimeType,
   parseNotification,
 } from "./colmi-protocol";
+import { SignalProcessor, type ProcessedMetrics } from "./signal-processor";
 
 export type ConnectionState = "disconnected" | "scanning" | "connecting" | "connected";
 
 export interface RingData {
   heartRate: number | null;
+  heartRateRaw: number | null;
   spo2: number | null;
+  hrv: number | null;
   accelX: number | null;
   accelY: number | null;
   accelZ: number | null;
   rawPpg: number | null;
+  signalQuality: "good" | "weak" | "none";
   lastUpdate: number;
 }
 
@@ -30,13 +34,17 @@ export class RingConnection {
   rxChar: BluetoothRemoteGATTCharacteristic | null = null;
   txChar: BluetoothRemoteGATTCharacteristic | null = null;
   state: ConnectionState = "disconnected";
+  processor = new SignalProcessor();
   data: RingData = {
     heartRate: null,
+    heartRateRaw: null,
     spo2: null,
+    hrv: null,
     accelX: null,
     accelY: null,
     accelZ: null,
     rawPpg: null,
+    signalQuality: "none",
     lastUpdate: 0,
   };
   personId: 1 | 2;
@@ -44,6 +52,7 @@ export class RingConnection {
   onData: (data: RingData) => void = () => {};
 
   private hrInterval: ReturnType<typeof setInterval> | null = null;
+  private emitInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor(personId: 1 | 2) {
     this.personId = personId;
@@ -85,12 +94,11 @@ export class RingConnection {
 
       this.device.addEventListener("gattserverdisconnected", () => {
         this.setState("disconnected");
-        this.stopPolling();
+        this.stopAll();
       });
 
       return await this.connect();
     } catch {
-      // User cancelled the picker or no device found — not an error
       this.setState("disconnected");
       return false;
     }
@@ -113,15 +121,30 @@ export class RingConnection {
         this.handleNotification.bind(this)
       );
 
-      // Start real-time HR
+      // Start real-time HR measurement
       await this.rxChar.writeValue(
         buildRealTimeCommand(RealTimeType.HEART_RATE, true)
       );
 
-      // Start polling: alternate between HR and SpO2 requests
+      this.processor.reset();
+      this.setState("connected");
+
+      // After 10s warmup, also request SpO2
+      setTimeout(async () => {
+        if (this.state !== "connected" || !this.rxChar) return;
+        try {
+          await this.rxChar.writeValue(
+            buildRealTimeCommand(RealTimeType.SPO2, true)
+          );
+        } catch { /* ignore */ }
+      }, 10000);
+
+      // Re-send HR START every 30s to keep measurement alive
       this.startPolling();
 
-      this.setState("connected");
+      // Emit processed metrics every 1s (smoothed, with HRV)
+      this.startEmitting();
+
       return true;
     } catch (err) {
       console.error("Connect failed:", err);
@@ -131,7 +154,7 @@ export class RingConnection {
   }
 
   async disconnect(): Promise<void> {
-    this.stopPolling();
+    this.stopAll();
 
     try {
       if (this.rxChar) {
@@ -139,25 +162,27 @@ export class RingConnection {
           buildRealTimeCommand(RealTimeType.HEART_RATE, false)
         );
       }
-    } catch {
-      // Ignore errors during cleanup
-    }
+    } catch { /* ignore */ }
 
     if (this.server?.connected) {
       this.server.disconnect();
     }
 
+    this.processor.reset();
     this.device = null;
     this.server = null;
     this.rxChar = null;
     this.txChar = null;
     this.data = {
       heartRate: null,
+      heartRateRaw: null,
       spo2: null,
+      hrv: null,
       accelX: null,
       accelY: null,
       accelZ: null,
       rawPpg: null,
+      signalQuality: "none",
       lastUpdate: 0,
     };
     this.setState("disconnected");
@@ -171,35 +196,57 @@ export class RingConnection {
     const parsed = parseNotification(value);
     if (!parsed) return;
 
-    if (parsed.heartRate !== undefined) this.data.heartRate = parsed.heartRate;
-    if (parsed.spo2 !== undefined) this.data.spo2 = parsed.spo2;
-    if (parsed.accelX !== undefined) this.data.accelX = parsed.accelX;
-    if (parsed.accelY !== undefined) this.data.accelY = parsed.accelY;
-    if (parsed.accelZ !== undefined) this.data.accelZ = parsed.accelZ;
-    if (parsed.rawPpg !== undefined) this.data.rawPpg = parsed.rawPpg;
+    // Feed raw values into signal processor
+    if (parsed.heartRate !== undefined) {
+      this.processor.addHeartRate(parsed.heartRate);
+    }
+    if (parsed.spo2 !== undefined) {
+      this.processor.addSpo2(parsed.spo2);
+    }
+    if (parsed.rawPpg !== undefined) {
+      this.processor.addRawPpg(parsed.rawPpg);
+    }
+  }
 
-    this.data.lastUpdate = Date.now();
-    this.onData({ ...this.data });
+  private startEmitting() {
+    // Every 1s: get smoothed metrics and emit to UI
+    this.emitInterval = setInterval(() => {
+      if (this.state !== "connected") return;
+
+      const processed = this.processor.getProcessed();
+      this.data = {
+        heartRate: processed.heartRate,
+        heartRateRaw: processed.heartRateRaw,
+        spo2: processed.spo2,
+        hrv: processed.hrv,
+        accelX: null,
+        accelY: null,
+        accelZ: null,
+        rawPpg: processed.rawPpg,
+        signalQuality: processed.signalQuality,
+        lastUpdate: Date.now(),
+      };
+      this.onData({ ...this.data });
+    }, 1000);
   }
 
   private startPolling() {
-    let toggle = false;
     this.hrInterval = setInterval(async () => {
       if (!this.rxChar || this.state !== "connected") return;
       try {
-        toggle = !toggle;
-        const type = toggle ? RealTimeType.SPO2 : RealTimeType.HEART_RATE;
-        await this.rxChar.writeValue(buildRealTimeCommand(type, true));
-      } catch {
-        // Ignore write errors during polling
-      }
-    }, 3000);
+        await this.rxChar.writeValue(buildRealTimeCommand(RealTimeType.HEART_RATE, true));
+      } catch { /* ignore */ }
+    }, 30000);
   }
 
-  private stopPolling() {
+  private stopAll() {
     if (this.hrInterval) {
       clearInterval(this.hrInterval);
       this.hrInterval = null;
+    }
+    if (this.emitInterval) {
+      clearInterval(this.emitInterval);
+      this.emitInterval = null;
     }
   }
 }

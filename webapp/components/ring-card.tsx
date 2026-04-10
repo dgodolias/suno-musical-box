@@ -34,11 +34,14 @@ export default function RingCard({
   const [state, setState] = useState<ConnectionState>("disconnected");
   const [data, setData] = useState<RingData>({
     heartRate: null,
+    heartRateRaw: null,
     spo2: null,
+    hrv: null,
     accelX: null,
     accelY: null,
     accelZ: null,
     rawPpg: null,
+    signalQuality: "none",
     lastUpdate: 0,
   });
   const [name, setName] = useState<string>("");
@@ -132,17 +135,22 @@ export default function RingCard({
               color="text-red-400"
             />
             <MetricBox
-              icon="O₂"
-              label="SpO2"
-              value={data.spo2}
-              unit="%"
-              color="text-blue-400"
+              icon="🫀"
+              label="HRV"
+              value={data.hrv}
+              unit="ms"
+              color="text-purple-400"
             />
           </div>
-          {data.accelX !== null && (
-            <div className="text-xs text-muted-foreground font-mono">
-              Accel: ({data.accelX?.toFixed(2)}, {data.accelY?.toFixed(2)},{" "}
-              {data.accelZ?.toFixed(2)})
+          {(data.spo2 !== null || data.rawPpg !== null || data.signalQuality) && (
+            <div className="flex items-center justify-between text-xs text-muted-foreground font-mono">
+              {data.spo2 !== null && <span>SpO2: {data.spo2}%</span>}
+              {data.rawPpg !== null && <span>PPG: {data.rawPpg}</span>}
+              {data.signalQuality && data.signalQuality !== "none" && (
+                <span className={data.signalQuality === "good" ? "text-emerald-500" : "text-yellow-500"}>
+                  Signal: {data.signalQuality}
+                </span>
+              )}
             </div>
           )}
 
