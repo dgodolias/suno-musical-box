@@ -77,23 +77,14 @@ export function parseNotification(data: DataView): ParsedReading | null {
   const type = data.getUint8(1);
 
   if (command === CMD_REAL_TIME) {
-    // HR/SpO2 value is at byte[3] — only use it when non-zero
-    // Bytes 6-7 are raw PPG sensor data, NOT HR/SpO2
     const value = data.getUint8(3);
+    if (value === 0) return null;
 
-    if (type === RealTimeType.HEART_RATE && value >= 40 && value <= 200) {
+    if (type === RealTimeType.HEART_RATE) {
       return { command, type, heartRate: value };
     }
-    if (type === RealTimeType.SPO2 && value >= 70 && value <= 100) {
+    if (type === RealTimeType.SPO2) {
       return { command, type, spo2: value };
-    }
-
-    // Even if HR/SpO2 not ready, extract raw PPG from bytes 6-7 if present
-    if (data.byteLength >= 8) {
-      const rawPpg = data.getUint16(6, true);
-      if (rawPpg > 0) {
-        return { command, type, rawPpg };
-      }
     }
   }
 

@@ -108,7 +108,7 @@ export default function Home() {
         heartRate: data.heartRate,
         spo2: data.spo2,
         temperature: null,
-        hrv: data.hrv ?? null,
+        hrv: null,
         rawPpg: data.rawPpg,
         accelX: data.accelX,
         accelY: data.accelY,
@@ -271,26 +271,20 @@ export default function Home() {
 
         setMockRing1Data({
           heartRate: r1.heartRate,
-          heartRateRaw: r1.heartRate,
           spo2: r1.spo2,
-          hrv: r1.hrv,
           accelX: r1.accelX,
           accelY: r1.accelY,
           accelZ: r1.accelZ,
           rawPpg: r1.rawPpg,
-          signalQuality: "good",
           lastUpdate: Date.now(),
         });
         setMockRing2Data({
           heartRate: r2.heartRate,
-          heartRateRaw: r2.heartRate,
           spo2: r2.spo2,
-          hrv: r2.hrv,
           accelX: r2.accelX,
           accelY: r2.accelY,
           accelZ: r2.accelZ,
           rawPpg: r2.rawPpg,
-          signalQuality: "good",
           lastUpdate: Date.now(),
         });
       }
