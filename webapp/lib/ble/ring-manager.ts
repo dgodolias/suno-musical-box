@@ -8,6 +8,8 @@ import {
   COLMI_TX_UUID,
   COLMI_RX_UUID,
   buildRealTimeCommand,
+  buildContinueHRCommand,
+  buildBatteryCommand,
   RealTimeType,
   parseNotification,
 } from "./colmi-protocol";
@@ -21,6 +23,8 @@ export interface RingData {
   accelY: number | null;
   accelZ: number | null;
   rawPpg: number | null;
+  batteryLevel: number | null;
+  isCharging: boolean;
   lastUpdate: number;
 }
 
@@ -37,6 +41,8 @@ export class RingConnection {
     accelY: null,
     accelZ: null,
     rawPpg: null,
+    batteryLevel: null,
+    isCharging: false,
     lastUpdate: 0,
   };
   personId: 1 | 2;
@@ -75,7 +81,7 @@ export class RingConnection {
           { namePrefix: "R06" },
           { namePrefix: "R09" },
         ],
-        optionalServices: [COLMI_SERVICE_UUID],
+        optionalServices: [COLMI_SERVICE_UUID, "de5bf728-d711-4e47-af26-65e3012a5dc7"],
       });
 
       if (!this.device) {
@@ -107,21 +113,31 @@ export class RingConnection {
       this.txChar = await service.getCharacteristic(COLMI_TX_UUID);
       this.rxChar = await service.getCharacteristic(COLMI_RX_UUID);
 
-      await this.txChar.startNotifications();
+      // Add listener BEFORE startNotifications to avoid missing early data
       this.txChar.addEventListener(
         "characteristicvaluechanged",
         this.handleNotification.bind(this)
       );
+      await this.txChar.startNotifications();
 
-      // Start real-time HR
-      await this.rxChar.writeValue(
+      // Wait for CCCD write to complete (Chrome race condition fix)
+      await new Promise((r) => setTimeout(r, 200));
+
+      // Check battery first
+      await this.rxChar.writeValueWithResponse(buildBatteryCommand());
+
+      // Send START real-time HR
+      await this.rxChar.writeValueWithResponse(
         buildRealTimeCommand(RealTimeType.HEART_RATE, true)
       );
 
-      // Start polling: alternate between HR and SpO2 requests
-      this.startPolling();
-
       this.setState("connected");
+
+      // Send CONTINUE every 2s to keep HR measurement alive
+      // (ring stops after ~10 readings if no CONTINUE received)
+      setTimeout(() => {
+        if (this.state === "connected") this.startPolling();
+      }, 3000);
       return true;
     } catch (err) {
       console.error("Connect failed:", err);
@@ -135,7 +151,7 @@ export class RingConnection {
 
     try {
       if (this.rxChar) {
-        await this.rxChar.writeValue(
+        await this.rxChar.writeValueWithResponse(
           buildRealTimeCommand(RealTimeType.HEART_RATE, false)
         );
       }
@@ -158,6 +174,8 @@ export class RingConnection {
       accelY: null,
       accelZ: null,
       rawPpg: null,
+      batteryLevel: null,
+      isCharging: false,
       lastUpdate: 0,
     };
     this.setState("disconnected");
@@ -168,9 +186,19 @@ export class RingConnection {
     const value = target.value;
     if (!value) return;
 
+    // Debug: always log raw bytes
+    const bytes = new Uint8Array(value.buffer);
+    const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(' ');
+    console.log(`[Ring ${this.personId}] ${hex} | byte3=${bytes[3]}`);
+
     const parsed = parseNotification(value);
     if (!parsed) return;
 
+    if (parsed.batteryLevel !== undefined) {
+      this.data.batteryLevel = parsed.batteryLevel;
+      this.data.isCharging = parsed.isCharging ?? false;
+      console.log(`[Ring ${this.personId}] Battery: ${parsed.batteryLevel}%${parsed.isCharging ? ' (charging)' : ''}`);
+    }
     if (parsed.heartRate !== undefined) this.data.heartRate = parsed.heartRate;
     if (parsed.spo2 !== undefined) this.data.spo2 = parsed.spo2;
     if (parsed.accelX !== undefined) this.data.accelX = parsed.accelX;
@@ -183,17 +211,15 @@ export class RingConnection {
   }
 
   private startPolling() {
-    let toggle = false;
+    // Send CONTINUE command every 2s to keep HR measurement alive
     this.hrInterval = setInterval(async () => {
       if (!this.rxChar || this.state !== "connected") return;
       try {
-        toggle = !toggle;
-        const type = toggle ? RealTimeType.SPO2 : RealTimeType.HEART_RATE;
-        await this.rxChar.writeValue(buildRealTimeCommand(type, true));
+        await this.rxChar.writeValueWithoutResponse(buildContinueHRCommand());
       } catch {
         // Ignore write errors during polling
       }
-    }, 3000);
+    }, 2000);
   }
 
   private stopPolling() {

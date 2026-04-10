@@ -39,6 +39,8 @@ export default function RingCard({
     accelY: null,
     accelZ: null,
     rawPpg: null,
+    batteryLevel: null,
+    isCharging: false,
     lastUpdate: 0,
   });
   const [name, setName] = useState<string>("");
@@ -115,36 +117,27 @@ export default function RingCard({
             {!mockMode && state === "connected" && "Connected"}
           </Badge>
         </div>
-        <p className="text-sm text-muted-foreground">
-          Size {size}
-          {displayName && ` — ${displayName}`}
-        </p>
+        <div className="flex items-center justify-between">
+          <p className="text-sm text-muted-foreground">
+            Size {size}
+            {displayName && ` — ${displayName}`}
+          </p>
+          {data.batteryLevel !== null && (
+            <span className={`text-xs ${data.batteryLevel < 20 ? "text-red-400" : "text-zinc-400"}`}>
+              🔋 {data.batteryLevel}%{data.isCharging ? " ⚡" : ""}
+            </span>
+          )}
+        </div>
       </CardHeader>
       <CardContent>
         <div className="space-y-3">
-          {/* Metrics */}
-          <div className="grid grid-cols-2 gap-2">
-            <MetricBox
-              icon="♥"
-              label="HR"
-              value={data.heartRate}
-              unit="BPM"
-              color="text-red-400"
-            />
-            <MetricBox
-              icon="O₂"
-              label="SpO2"
-              value={data.spo2}
-              unit="%"
-              color="text-blue-400"
-            />
-          </div>
-          {data.accelX !== null && (
-            <div className="text-xs text-muted-foreground font-mono">
-              Accel: ({data.accelX?.toFixed(2)}, {data.accelY?.toFixed(2)},{" "}
-              {data.accelZ?.toFixed(2)})
+          {/* Heart Rate — big and centered */}
+          <div className="rounded-xl bg-zinc-900/50 py-4 text-center">
+            <div className={`text-4xl font-bold tabular-nums ${data.heartRate !== null ? "text-red-400" : "text-zinc-600"}`}>
+              {data.heartRate !== null ? data.heartRate : "--"}
             </div>
-          )}
+            <div className="text-xs text-muted-foreground mt-1">♥ BPM</div>
+          </div>
 
           {/* Action button */}
           {mockMode ? (

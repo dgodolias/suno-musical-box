@@ -276,6 +276,8 @@ export default function Home() {
           accelY: r1.accelY,
           accelZ: r1.accelZ,
           rawPpg: r1.rawPpg,
+          batteryLevel: 85,
+          isCharging: false,
           lastUpdate: Date.now(),
         });
         setMockRing2Data({
@@ -285,6 +287,8 @@ export default function Home() {
           accelY: r2.accelY,
           accelZ: r2.accelZ,
           rawPpg: r2.rawPpg,
+          batteryLevel: 72,
+          isCharging: false,
           lastUpdate: Date.now(),
         });
       }
