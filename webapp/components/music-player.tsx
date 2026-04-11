@@ -135,8 +135,8 @@ export default function MusicPlayer({
       {history.length > 0 && (
         <div className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-5 space-y-3">
           <h3 className="font-semibold text-sm">History</h3>
-          {history.map((song) => (
-            <Card key={song.number} className="bg-zinc-900/50 border-zinc-800">
+          {history.map((song, idx) => (
+            <Card key={`${song.number}-${idx}`} className="bg-zinc-900/50 border-zinc-800">
               <CardContent className="p-3 flex items-center justify-between">
                 <div className="text-sm">
                   <span className="font-medium">Song #{song.number}</span>

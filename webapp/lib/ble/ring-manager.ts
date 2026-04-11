@@ -1,6 +1,6 @@
 /**
  * BLE Ring Manager — scan, connect, disconnect.
- * Uses Web Bluetooth API (Chrome/Edge only).
+ * Matches the colmi_r02_client Python implementation exactly.
  */
 
 import {
@@ -8,8 +8,6 @@ import {
   COLMI_TX_UUID,
   COLMI_RX_UUID,
   buildRealTimeCommand,
-  buildContinueHRCommand,
-  buildBatteryCommand,
   RealTimeType,
   parseNotification,
 } from "./colmi-protocol";
@@ -49,7 +47,8 @@ export class RingConnection {
   onStateChange: (state: ConnectionState) => void = () => {};
   onData: (data: RingData) => void = () => {};
 
-  private hrInterval: ReturnType<typeof setInterval> | null = null;
+  // Measurement restart timer (Python client does one-shot, we repeat)
+  private measurementTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(personId: 1 | 2) {
     this.personId = personId;
@@ -66,7 +65,7 @@ export class RingConnection {
 
   async scan(): Promise<boolean> {
     if (!navigator.bluetooth) {
-      alert("Web Bluetooth is not supported in this browser. Use Chrome or Edge.");
+      alert("Web Bluetooth is not supported. Use Chrome or Edge.");
       return false;
     }
 
@@ -81,7 +80,7 @@ export class RingConnection {
           { namePrefix: "R06" },
           { namePrefix: "R09" },
         ],
-        optionalServices: [COLMI_SERVICE_UUID, "de5bf728-d711-4e47-af26-65e3012a5dc7"],
+        optionalServices: [COLMI_SERVICE_UUID],
       });
 
       if (!this.device) {
@@ -91,12 +90,11 @@ export class RingConnection {
 
       this.device.addEventListener("gattserverdisconnected", () => {
         this.setState("disconnected");
-        this.stopPolling();
+        this.stopMeasurement();
       });
 
       return await this.connect();
     } catch {
-      // User cancelled the picker or no device found — not an error
       this.setState("disconnected");
       return false;
     }
@@ -113,31 +111,23 @@ export class RingConnection {
       this.txChar = await service.getCharacteristic(COLMI_TX_UUID);
       this.rxChar = await service.getCharacteristic(COLMI_RX_UUID);
 
-      // Add listener BEFORE startNotifications to avoid missing early data
+      // Subscribe to notifications (matching Python: subscribe first, then write)
       this.txChar.addEventListener(
         "characteristicvaluechanged",
         this.handleNotification.bind(this)
       );
       await this.txChar.startNotifications();
 
-      // Wait for CCCD write to complete (Chrome race condition fix)
-      await new Promise((r) => setTimeout(r, 200));
-
-      // Check battery first
-      await this.rxChar.writeValueWithResponse(buildBatteryCommand());
-
-      // Send START real-time HR
-      await this.rxChar.writeValueWithResponse(
-        buildRealTimeCommand(RealTimeType.HEART_RATE, true)
-      );
-
       this.setState("connected");
 
-      // Send CONTINUE every 2s to keep HR measurement alive
-      // (ring stops after ~10 readings if no CONTINUE received)
+      // Don't start measurement immediately — let user connect both rings first
+      // Measurement starts when user clicks "Start Session" or after 10s auto-start
       setTimeout(() => {
-        if (this.state === "connected") this.startPolling();
-      }, 3000);
+        if (this.state === "connected" && this.data.heartRate === null) {
+          this.startMeasurement();
+        }
+      }, 10000);
+
       return true;
     } catch (err) {
       console.error("Connect failed:", err);
@@ -146,18 +136,64 @@ export class RingConnection {
     }
   }
 
+  async beginMeasurement(): Promise<void> {
+    return this.startMeasurement();
+  }
+
+  private async startMeasurement(): Promise<void> {
+    if (!this.rxChar || this.state !== "connected") return;
+
+    const startCmd = buildRealTimeCommand(RealTimeType.HEART_RATE, true);
+
+    // Retry START up to 3 times with 1s delay between attempts
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        console.log(`[Ring ${this.personId}] START HR attempt ${attempt}/3...`);
+
+        if (this.rxChar.properties.writeWithoutResponse) {
+          await this.rxChar.writeValueWithoutResponse(startCmd);
+        } else {
+          await this.rxChar.writeValue(startCmd);
+        }
+
+        console.log(`[Ring ${this.personId}] START sent OK (attempt ${attempt})`);
+        break;
+      } catch (err) {
+        console.error(`[Ring ${this.personId}] START failed attempt ${attempt}:`, err);
+        if (attempt < 3) {
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+      }
+    }
+
+    // Restart measurement every 45s (in case ring stops streaming)
+    if (!this.measurementTimer) {
+      this.measurementTimer = setInterval(() => {
+        this.startMeasurement();
+      }, 45000);
+    }
+  }
+
+  private stopMeasurement(): void {
+    if (this.measurementTimer) {
+      clearInterval(this.measurementTimer);
+      this.measurementTimer = null;
+    }
+  }
+
   async disconnect(): Promise<void> {
-    this.stopPolling();
+    this.stopMeasurement();
 
     try {
       if (this.rxChar) {
-        await this.rxChar.writeValueWithResponse(
-          buildRealTimeCommand(RealTimeType.HEART_RATE, false)
-        );
+        const stopCmd = buildRealTimeCommand(RealTimeType.HEART_RATE, false);
+        if (this.rxChar.properties.writeWithoutResponse) {
+          await this.rxChar.writeValueWithoutResponse(stopCmd);
+        } else {
+          await this.rxChar.writeValue(stopCmd);
+        }
       }
-    } catch {
-      // Ignore errors during cleanup
-    }
+    } catch { /* ignore */ }
 
     if (this.server?.connected) {
       this.server.disconnect();
@@ -186,10 +222,13 @@ export class RingConnection {
     const value = target.value;
     if (!value) return;
 
-    // Debug: always log raw bytes
+    // Debug log
     const bytes = new Uint8Array(value.buffer);
     const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(' ');
-    console.log(`[Ring ${this.personId}] ${hex} | byte3=${bytes[3]}`);
+    const b3 = bytes[3];
+    if (b3 > 0) {
+      console.log(`[Ring ${this.personId}] ${hex} | byte3=${b3} *** HR DATA ***`);
+    }
 
     const parsed = parseNotification(value);
     if (!parsed) return;
@@ -197,35 +236,16 @@ export class RingConnection {
     if (parsed.batteryLevel !== undefined) {
       this.data.batteryLevel = parsed.batteryLevel;
       this.data.isCharging = parsed.isCharging ?? false;
-      console.log(`[Ring ${this.personId}] Battery: ${parsed.batteryLevel}%${parsed.isCharging ? ' (charging)' : ''}`);
+      console.log(`[Ring ${this.personId}] Battery: ${parsed.batteryLevel}%`);
     }
-    if (parsed.heartRate !== undefined) this.data.heartRate = parsed.heartRate;
+    if (parsed.heartRate !== undefined) {
+      this.data.heartRate = parsed.heartRate;
+      console.log(`[Ring ${this.personId}] HR: ${parsed.heartRate} BPM`);
+    }
     if (parsed.spo2 !== undefined) this.data.spo2 = parsed.spo2;
-    if (parsed.accelX !== undefined) this.data.accelX = parsed.accelX;
-    if (parsed.accelY !== undefined) this.data.accelY = parsed.accelY;
-    if (parsed.accelZ !== undefined) this.data.accelZ = parsed.accelZ;
     if (parsed.rawPpg !== undefined) this.data.rawPpg = parsed.rawPpg;
 
     this.data.lastUpdate = Date.now();
     this.onData({ ...this.data });
-  }
-
-  private startPolling() {
-    // Send CONTINUE command every 2s to keep HR measurement alive
-    this.hrInterval = setInterval(async () => {
-      if (!this.rxChar || this.state !== "connected") return;
-      try {
-        await this.rxChar.writeValueWithoutResponse(buildContinueHRCommand());
-      } catch {
-        // Ignore write errors during polling
-      }
-    }, 2000);
-  }
-
-  private stopPolling() {
-    if (this.hrInterval) {
-      clearInterval(this.hrInterval);
-      this.hrInterval = null;
-    }
   }
 }

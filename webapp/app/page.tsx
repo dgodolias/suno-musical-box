@@ -97,7 +97,7 @@ export default function Home() {
     }
   }, [mockMode]);
 
-  const bothConnected = ring1Connected && ring2Connected;
+  const anyConnected = ring1Connected || ring2Connected;
 
   const addReading = useCallback(
     (personId: 1 | 2, data: RingData) => {
@@ -171,6 +171,8 @@ export default function Home() {
               return song;
             });
             setGenerationStatus("");
+            // Stop session after first song
+            setIsActive(false);
             return;
           }
         } catch (err) {
@@ -184,11 +186,15 @@ export default function Home() {
 
   const generateSong = useCallback(async () => {
     const readings = readingsRef.current;
-    const p1 = readings.filter((r) => r.personId === 1);
-    const p2 = readings.filter((r) => r.personId === 2);
+    let p1 = readings.filter((r) => r.personId === 1);
+    let p2 = readings.filter((r) => r.personId === 2);
 
-    if (p1.length < 5 || p2.length < 5) {
-      setGenerationStatus("Not enough data from both rings");
+    // If only 1 ring connected, duplicate its data for both persons
+    if (p1.length < 5 && p2.length >= 5) p1 = p2;
+    if (p2.length < 5 && p1.length >= 5) p2 = p1;
+
+    if (p1.length < 5) {
+      setGenerationStatus("Not enough data — wait a bit longer");
       return;
     }
 
@@ -234,6 +240,17 @@ export default function Home() {
       readingsRef.current = [];
       mockTickRef.current = 0;
       setGenerationStatus("Collecting biometric data...");
+
+      // Start HR measurement on all connected rings (sequentially to avoid BLE conflicts)
+      if (!mockMode) {
+        if (ring1Ref.current?.state === "connected") {
+          await ring1Ref.current.beginMeasurement();
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        if (ring2Ref.current?.state === "connected") {
+          await ring2Ref.current.beginMeasurement();
+        }
+      }
     } catch (err) {
       console.error("Failed to start session:", err);
     }
@@ -302,13 +319,8 @@ export default function Home() {
           sendReadingsToApi(batch);
         }
 
-        // Trigger generation after window
+        // Trigger generation once after window
         if (next === WINDOW_SEC) {
-          generateSong();
-        }
-
-        // Auto-regenerate every WINDOW_SEC after first
-        if (next > WINDOW_SEC && next % WINDOW_SEC === 0) {
           generateSong();
         }
 
@@ -339,8 +351,8 @@ export default function Home() {
               <Button
                 onClick={startSession}
                 size="lg"
-                disabled={!bothConnected}
-                title={!bothConnected ? "Connect both rings first" : ""}
+                disabled={!anyConnected}
+                title={!anyConnected ? "Connect at least one ring" : ""}
               >
                 Start Session
               </Button>
@@ -454,7 +466,7 @@ export default function Home() {
           currentSong={currentSong}
           history={history}
           generationStatus={generationStatus}
-          onSongEnd={generateSong}
+          onSongEnd={() => {}}
         />
 
         {/* Footer */}
