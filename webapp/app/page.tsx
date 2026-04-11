@@ -364,31 +364,6 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Mock mode toggle */}
-        <div className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3">
-          <div>
-            <span className="text-sm font-medium">Mock Mode</span>
-            <span className="ml-2 text-xs text-zinc-500">
-              Fake biometrics, no rings needed
-            </span>
-          </div>
-          <button
-            onClick={() => {
-              if (!isActive) setMockMode((m) => !m);
-            }}
-            disabled={isActive}
-            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-              mockMode ? "bg-emerald-600" : "bg-zinc-700"
-            } ${isActive ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
-          >
-            <span
-              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                mockMode ? "translate-x-6" : "translate-x-1"
-              }`}
-            />
-          </button>
-        </div>
-
         {/* Settings */}
         <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3">
           <button
