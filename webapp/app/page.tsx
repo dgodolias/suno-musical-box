@@ -101,7 +101,9 @@ export default function Home() {
 
   const addReading = useCallback(
     (personId: 1 | 2, data: RingData) => {
-      if (!isActive) return;
+      // Always store readings (even before session starts)
+      // so we have data ready when generation triggers
+      if (data.heartRate === null) return; // skip empty readings
       readingsRef.current.push({
         personId,
         timestamp: Date.now(),
@@ -114,8 +116,12 @@ export default function Home() {
         accelY: data.accelY,
         accelZ: data.accelZ,
       });
+      // Keep buffer bounded (last 300 readings)
+      if (readingsRef.current.length > 300) {
+        readingsRef.current = readingsRef.current.slice(-200);
+      }
     },
-    [isActive]
+    []
   );
 
   const sendReadingsToApi = useCallback(
@@ -319,9 +325,29 @@ export default function Home() {
           sendReadingsToApi(batch);
         }
 
-        // Trigger generation once after window
+        const readings = readingsRef.current;
+        const p1count = readings.filter((r) => r.personId === 1).length;
+        const p2count = readings.filter((r) => r.personId === 2).length;
+
+        // At 30s: generate if both rings have data
         if (next === WINDOW_SEC) {
-          generateSong();
+          if (p1count >= 5 && p2count >= 5) {
+            generateSong();
+          } else {
+            setGenerationStatus("Waiting for both rings... continuing to 60s");
+          }
+        }
+
+        // At 60s: generate with whatever we have (duplicate if needed)
+        if (next === WINDOW_SEC * 2) {
+          if (p1count >= 5 || p2count >= 5) {
+            if (p1count < 5 || p2count < 5) {
+              setGenerationStatus("Sending with duplicate data (1 ring only)");
+            }
+            generateSong();
+          } else {
+            setGenerationStatus("No data from any ring");
+          }
         }
 
         return next;
@@ -427,11 +453,8 @@ export default function Home() {
         {/* Session panel */}
         <SessionPanel
           isActive={isActive}
-          collectSeconds={
-            collectSeconds % WINDOW_SEC ||
-            (collectSeconds > 0 ? WINDOW_SEC : 0)
-          }
-          windowSeconds={WINDOW_SEC}
+          collectSeconds={Math.min(collectSeconds, WINDOW_SEC * 2)}
+          windowSeconds={WINDOW_SEC * 2}
           snapshot={snapshot}
           status={generationStatus || (isActive ? "Collecting..." : "")}
         />
