@@ -82,7 +82,7 @@ export function buildPrompt(
   const complexity = mapComplexity(hrvNorm);
   const rhythm = mapRhythm(movement);
 
-  const prompt = `A ${genre} instrumental song that is ${tempo}. ${capitalize(mood)}. ${capitalize(instruments)}. ${capitalize(harmony)}. ${capitalize(complexity)}. ${capitalize(rhythm)}. Clear mix, separated instruments, professional quality, polished production.`;
+  const prompt = `[Short, 1 minute] A ${genre} instrumental song that is ${tempo}. ${capitalize(mood)}. ${capitalize(instruments)}. ${capitalize(harmony)}. ${capitalize(complexity)}. ${capitalize(rhythm)}. Clear mix, separated instruments, professional quality, polished production.`;
 
   return { prompt, style: genre };
 }
