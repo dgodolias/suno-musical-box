@@ -70,6 +70,7 @@ export default function Home() {
   const [currentSong, setCurrentSong] = useState<Song | null>(null);
   const [history, setHistory] = useState<Song[]>([]);
   const [songCount, setSongCount] = useState(0);
+  const [generationProgress, setGenerationProgress] = useState(0);
   const [ring1Connected, setRing1Connected] = useState(false);
   const [ring2Connected, setRing2Connected] = useState(false);
   const [mockMode, setMockMode] = useState(false);
@@ -156,6 +157,28 @@ export default function Home() {
   const pollForSong = useCallback(
     async (taskId: string, songNumber: number, prompt: string, style: string) => {
       setGenerationStatus("Generating music...");
+      setGenerationProgress(0);
+
+      // Progress animation: smooth to ~90% over 120s, then slow crawl
+      const startTime = Date.now();
+      const progressInterval = setInterval(() => {
+        const elapsed = (Date.now() - startTime) / 1000;
+        let progress: number;
+
+        if (elapsed <= 108) {
+          // 0-90% over first 108 seconds (linear)
+          progress = (elapsed / 108) * 90;
+        } else {
+          // 90-99% asymptotic slowdown: each extra 1% takes longer
+          // Never reaches 100% on its own
+          const extra = elapsed - 108;
+          progress = 90 + (9 * extra) / (extra + 30);
+        }
+
+        setGenerationProgress(Math.min(99, Math.round(progress)));
+      }, 500);
+
+      // Poll Suno for actual completion
       for (let i = 0; i < 30; i++) {
         await new Promise((r) => setTimeout(r, 10000));
         try {
@@ -163,9 +186,10 @@ export default function Home() {
           if (sunoKey) headers["x-suno-key"] = sunoKey;
           const res = await fetch(`/api/generate/${taskId}`, { headers });
           const data = await res.json();
-          setGenerationStatus(`Generating... (${(i + 1) * 10}s)`);
 
           if (data.status === "ready" && data.audioUrl) {
+            clearInterval(progressInterval);
+            setGenerationProgress(100);
             const song: Song = {
               audioUrl: data.audioUrl,
               style,
@@ -177,7 +201,6 @@ export default function Home() {
               return song;
             });
             setGenerationStatus("");
-            // Stop session after first song
             setIsActive(false);
             return;
           }
@@ -185,6 +208,9 @@ export default function Home() {
           console.error("Poll error:", err);
         }
       }
+
+      clearInterval(progressInterval);
+      setGenerationProgress(0);
       setGenerationStatus("Generation timed out");
     },
     []
@@ -464,6 +490,7 @@ export default function Home() {
           currentSong={currentSong}
           history={history}
           generationStatus={generationStatus}
+          generationProgress={generationProgress}
           onSongEnd={() => {}}
         />
 

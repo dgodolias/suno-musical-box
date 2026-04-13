@@ -15,6 +15,7 @@ interface MusicPlayerProps {
   currentSong: Song | null;
   history: Song[];
   generationStatus: string;
+  generationProgress?: number;
   onSongEnd?: () => void;
 }
 
@@ -22,6 +23,7 @@ export default function MusicPlayer({
   currentSong,
   history,
   generationStatus,
+  generationProgress = 0,
   onSongEnd,
 }: MusicPlayerProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -125,9 +127,24 @@ export default function MusicPlayer({
             </div>
           </>
         ) : (
-          <p className="text-muted-foreground text-sm">
-            {generationStatus || "No song yet. Connect rings and start a session."}
-          </p>
+          <div className="space-y-3">
+            <p className="text-muted-foreground text-sm">
+              {generationStatus || "No song yet. Connect rings and start a session."}
+            </p>
+            {generationProgress > 0 && generationProgress < 100 && (
+              <div className="space-y-1.5">
+                <div className="relative h-2 bg-zinc-800 rounded-full overflow-hidden">
+                  <div
+                    className="absolute h-full bg-emerald-500 rounded-full transition-all duration-500 ease-out"
+                    style={{ width: `${generationProgress}%` }}
+                  />
+                </div>
+                <div className="text-xs text-zinc-500 text-right tabular-nums">
+                  {generationProgress}%
+                </div>
+              </div>
+            )}
+          </div>
         )}
       </div>
 

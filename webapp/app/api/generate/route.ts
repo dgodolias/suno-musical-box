@@ -26,7 +26,7 @@ export async function POST(request: Request) {
       title: `Musical Box`,
       customMode: true,
       instrumental: true,
-      model: "V4",
+      model: "V4_5",
       callBackUrl: "https://example.com/callback",
     }),
   });
