@@ -8,7 +8,7 @@ import MusicPlayer from "@/components/music-player";
 import { type RingData, RingConnection } from "@/lib/ble/ring-manager";
 import {
   type BiometricReading,
-  type BiometricSnapshot,
+
   computeSnapshot,
 } from "@/lib/biometrics";
 import { buildPrompt } from "@/lib/prompt-builder";
@@ -65,12 +65,12 @@ export default function Home() {
   const [sessionId, setSessionId] = useState<number | null>(null);
   const [isActive, setIsActive] = useState(false);
   const [collectSeconds, setCollectSeconds] = useState(0);
-  const [snapshot, setSnapshot] = useState<BiometricSnapshot | null>(null);
   const [generationStatus, setGenerationStatus] = useState("");
   const [currentSong, setCurrentSong] = useState<Song | null>(null);
   const [history, setHistory] = useState<Song[]>([]);
   const [songCount, setSongCount] = useState(0);
   const [generationProgress, setGenerationProgress] = useState(0);
+  const generatingRef = useRef(false);
   const [ring1Connected, setRing1Connected] = useState(false);
   const [ring2Connected, setRing2Connected] = useState(false);
   const [mockMode, setMockMode] = useState(false);
@@ -217,6 +217,10 @@ export default function Home() {
   );
 
   const generateSong = useCallback(async () => {
+    // Prevent double generation
+    if (generatingRef.current) return;
+    generatingRef.current = true;
+
     const readings = readingsRef.current;
     let p1 = readings.filter((r) => r.personId === 1);
     let p2 = readings.filter((r) => r.personId === 2);
@@ -227,11 +231,12 @@ export default function Home() {
 
     if (p1.length < 5) {
       setGenerationStatus("Not enough data — wait a bit longer");
+      generatingRef.current = false;
       return;
     }
 
     const snap = computeSnapshot(p1, p2);
-    setSnapshot(snap);
+
 
     const { prompt, style } = buildPrompt(snap);
     setGenerationStatus("Submitting to Suno...");
@@ -269,20 +274,11 @@ export default function Home() {
       setSessionId(data.sessionId);
       setIsActive(true);
       setCollectSeconds(0);
-      readingsRef.current = [];
+      generatingRef.current = false;
       mockTickRef.current = 0;
+      // DON'T clear readings — rings are already streaming data
+      // DON'T re-send beginMeasurement — causes warmup delay with zeros
       setGenerationStatus("Collecting biometric data...");
-
-      // Start HR measurement on all connected rings (sequentially to avoid BLE conflicts)
-      if (!mockMode) {
-        if (ring1Ref.current?.state === "connected") {
-          await ring1Ref.current.beginMeasurement();
-          await new Promise((r) => setTimeout(r, 500));
-        }
-        if (ring2Ref.current?.state === "connected") {
-          await ring2Ref.current.beginMeasurement();
-        }
-      }
     } catch (err) {
       console.error("Failed to start session:", err);
     }
@@ -342,6 +338,9 @@ export default function Home() {
         });
       }
 
+      // Skip if already generating
+      if (generatingRef.current) return;
+
       setCollectSeconds((s) => {
         const next = s + 1;
 
@@ -354,24 +353,30 @@ export default function Home() {
         const readings = readingsRef.current;
         const p1count = readings.filter((r) => r.personId === 1).length;
         const p2count = readings.filter((r) => r.personId === 2).length;
+        const bothHaveData = p1count >= 5 && p2count >= 5;
+        const oneHasData = p1count >= 5 || p2count >= 5;
 
-        // At 30s: generate if both rings have data
-        if (next === WINDOW_SEC) {
-          if (p1count >= 5 && p2count >= 5) {
-            generateSong();
-          } else {
-            setGenerationStatus("Waiting for both rings... continuing to 60s");
+        // As soon as both rings have data, generate immediately & stop counting
+        if (bothHaveData && !generatingRef.current) {
+          generateSong();
+          // Stop the interval from outside
+          if (collectIntervalRef.current) {
+            clearInterval(collectIntervalRef.current);
+            collectIntervalRef.current = null;
           }
+          return next;
         }
 
         // At 60s: generate with whatever we have (duplicate if needed)
         if (next === WINDOW_SEC * 2) {
-          if (p1count >= 5 || p2count >= 5) {
-            if (p1count < 5 || p2count < 5) {
-              setGenerationStatus("Sending with duplicate data (1 ring only)");
-            }
+          if (collectIntervalRef.current) {
+            clearInterval(collectIntervalRef.current);
+            collectIntervalRef.current = null;
+          }
+          if (oneHasData && !generatingRef.current) {
+            setGenerationStatus("Sending with 1 ring data (duplicate)");
             generateSong();
-          } else {
+          } else if (!generatingRef.current) {
             setGenerationStatus("No data from any ring");
           }
         }
@@ -481,7 +486,6 @@ export default function Home() {
           isActive={isActive}
           collectSeconds={Math.min(collectSeconds, WINDOW_SEC * 2)}
           windowSeconds={WINDOW_SEC * 2}
-          snapshot={snapshot}
           status={generationStatus || (isActive ? "Collecting..." : "")}
         />
 

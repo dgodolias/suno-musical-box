@@ -27,6 +27,7 @@ export async function POST(request: Request) {
       customMode: true,
       instrumental: true,
       model: "V4_5",
+      negativeTags: "noise, static, hiss, distortion, lo-fi, raw, demo",
       callBackUrl: "https://example.com/callback",
     }),
   });

@@ -1,13 +1,11 @@
 "use client";
 
 import { Progress } from "@/components/ui/progress";
-import { type BiometricSnapshot } from "@/lib/biometrics";
 
 interface SessionPanelProps {
   isActive: boolean;
   collectSeconds: number;
   windowSeconds: number;
-  snapshot: BiometricSnapshot | null;
   status: string;
 }
 
@@ -15,7 +13,6 @@ export default function SessionPanel({
   isActive,
   collectSeconds,
   windowSeconds,
-  snapshot,
   status,
 }: SessionPanelProps) {
   const progress = Math.min(100, (collectSeconds / windowSeconds) * 100);
@@ -38,25 +35,6 @@ export default function SessionPanel({
         </div>
         <Progress value={progress} className="h-2" />
       </div>
-
-      {snapshot && (
-        <div className="grid grid-cols-4 gap-3 text-center">
-          <MiniStat label="Arousal" value={snapshot.combinedArousal} />
-          <MiniStat label="Valence" value={snapshot.combinedValence} />
-          <MiniStat label="Sync" value={snapshot.synchronyScore} />
-          <MiniStat label="Movement" value={snapshot.movementIntensity} />
-        </div>
-      )}
-    </div>
-  );
-}
-
-function MiniStat({ label, value }: { label: string; value: number }) {
-  const pct = Math.round(value * 100);
-  return (
-    <div>
-      <div className="text-lg font-bold tabular-nums">{pct}%</div>
-      <div className="text-xs text-muted-foreground">{label}</div>
     </div>
   );
 }
