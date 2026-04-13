@@ -11,6 +11,7 @@
 
 ## Suno API
 - Generation takes **1.5-2 minutes**. Not real-time.
+- Each song costs ~ 0.07$
 
 ## Web App
 - **Chrome/Edge only** — Firefox and Safari do not support Web Bluetooth.
