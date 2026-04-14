@@ -1,17 +1,28 @@
-# Limitations
+# Περιορισμοί
 
-## BLE / Colmi R02 Rings
-- The rings need **30-40 seconds** after connection to start providing BPM readings. During this warmup period, the PPG sensor calibrates and byte[3] (HR value) stays at 0.
-- Chrome/Edge can struggle with **2 simultaneous BLE connections**. The second ring may fail to connect — retry usually works.
-- BLE connections **drop on page reload**. User must reconnect manually.
-- The rings **auto-sleep** after inactivity and **die without warning** at low battery.
-- **Only 1 metric at a time**: HR and SpO2 cannot run simultaneously (different LED modes: green=HR, red=SpO2). The ring's firmware allows only one measurement type per session.
-- **Raw sensor streaming (0xA1)** for accelerometer/PPG can technically run alongside HR (0x69) but shares the same BLE TX channel — packets interleave and can corrupt each other.
-- **Available real-time**: HR only. SpO2 requires separate measurement cycle. Accelerometer possible but unreliable alongside HR.
+## BLE / Colmi R02 Δαχτυλίδια
+- Τα δαχτυλίδια χρειάζονται **30-40 δευτερόλεπτα** μετά τη σύνδεση για να αρχίσουν να δίνουν μετρήσεις BPM. Κατά τη διάρκεια αυτής της περιόδου, ο αισθητήρας PPG βαθμονομείται.
+- Ο Chrome/Edge μπορεί να δυσκολευτεί με **2 ταυτόχρονες BLE συνδέσεις**. Το δεύτερο δαχτυλίδι μπορεί να αποτύχει να συνδεθεί — συνήθως δουλεύει στη δεύτερη προσπάθεια.
+- Οι BLE συνδέσεις **χάνονται με ανανέωση σελίδας**. Ο χρήστης πρέπει να ξανασυνδεθεί χειροκίνητα.
+- Τα δαχτυλίδια **κοιμούνται** μετά από αδράνεια και **σβήνουν χωρίς προειδοποίηση** σε χαμηλή μπαταρία.
+- **Μόνο 1 μέτρηση τη φορά**: HR και SpO2 δεν μπορούν να τρέξουν ταυτόχρονα (διαφορετικά LED: πράσινο=HR, κόκκινο=SpO2). Το firmware επιτρέπει μόνο έναν τύπο μέτρησης ανά session.
+- **Αν αποσυνδεθεί 1 δαχτυλίδι, αποσυνδέονται και τα 2** — περιορισμός του BLE adapter στα Windows.
+- **Διαθέσιμο real-time**: Μόνο HR. Το SpO2 απαιτεί ξεχωριστό κύκλο μέτρησης.
 
 ## Suno API
-- Generation takes **1.5-2 minutes**. Not real-time.
-- Each song costs ~ 0.07$
+- Η δημιουργία τραγουδιού διαρκεί **1.5-2 λεπτά**. Δεν είναι real-time.
+- Κάθε τραγούδι κοστίζει ~0.07$.
 
 ## Web App
-- **Chrome/Edge only** — Firefox and Safari do not support Web Bluetooth.
+- **Μόνο Chrome/Edge** — Firefox και Safari δεν υποστηρίζουν Web Bluetooth.
+
+---
+
+# Οδηγίες χρήσης
+
+1. Τα δαχτυλίδια **δεν πρέπει να είναι συνδεδεμένα πουθενά αλλού** (π.χ. QRing app, άλλο tab) πριν τα συνδέσετε.
+2. Αν δεν τα βρίσκει το Bluetooth, πατήστε **Ακύρωση** και ξαναπατήστε **Scan & Connect**.
+3. Όταν συνδέετε το πρώτο δαχτυλίδι, αυτό παίρνει το εικονίδιο του Bluetooth. Όταν πάτε να συνδέσετε το δεύτερο, **επιλέξτε αυτό με το τρίγωνο** (όχι αυτό με το Bluetooth).
+4. Μόλις συνδεθεί ένα δαχτυλίδι, αρχίζει αυτόματα το countdown των 30-40s για την πρώτη μέτρηση.
+5. Πατώντας **Start Session**: αν δεν υπάρχουν μετρήσεις και από τα 2 δαχτυλίδια, περιμένει μέχρι να πάρει. Αλλιώς στέλνει τις μετρήσεις στο Suno και αρχίζει η δημιουργία τραγουδιού.
+6. Αν κάνετε **refresh τη σελίδα, χάνονται όλα** — connection, μετρήσεις, τραγούδι. Ξεκινάτε από την αρχή.
