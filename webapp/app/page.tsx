@@ -78,6 +78,8 @@ export default function Home() {
   const [showSettings, setShowSettings] = useState(false);
   const [mockRing1Data, setMockRing1Data] = useState<RingData | null>(null);
   const [mockRing2Data, setMockRing2Data] = useState<RingData | null>(null);
+  const [genre1, setGenre1] = useState<string | null>(null);
+  const [genre2, setGenre2] = useState<string | null>(null);
 
   const ring1Ref = useRef<RingConnection | null>(null);
   const ring2Ref = useRef<RingConnection | null>(null);
@@ -229,16 +231,10 @@ export default function Home() {
     if (p1.length < 5 && p2.length >= 5) p1 = p2;
     if (p2.length < 5 && p1.length >= 5) p2 = p1;
 
-    if (p1.length < 5) {
-      setGenerationStatus("Not enough data — wait a bit longer");
-      generatingRef.current = false;
-      return;
-    }
+    // Ring data is only logged; the song comes from the genres alone
+    const snap = p1.length >= 5 ? computeSnapshot(p1, p2) : null;
 
-    const snap = computeSnapshot(p1, p2);
-
-
-    const { prompt, style } = buildPrompt(snap);
+    const { prompt, style } = buildPrompt(genre1, genre2);
     setGenerationStatus("Submitting to Suno...");
 
     try {
@@ -261,7 +257,7 @@ export default function Home() {
     } catch (err) {
       setGenerationStatus("API error: " + String(err));
     }
-  }, [sessionId, songCount, pollForSong]);
+  }, [sessionId, songCount, pollForSong, genre1, genre2]);
 
   const startSession = useCallback(async () => {
     try {
@@ -350,35 +346,13 @@ export default function Home() {
           sendReadingsToApi(batch);
         }
 
-        const readings = readingsRef.current;
-        const p1count = readings.filter((r) => r.personId === 1).length;
-        const p2count = readings.filter((r) => r.personId === 2).length;
-        const bothHaveData = p1count >= 5 && p2count >= 5;
-        const oneHasData = p1count >= 5 || p2count >= 5;
-
-        // As soon as both rings have data, generate immediately & stop counting
-        if (bothHaveData && !generatingRef.current) {
+        // After the window, always generate — with or without ring data
+        if (next === WINDOW_SEC) {
+          if (collectIntervalRef.current) {
+            clearInterval(collectIntervalRef.current);
+            collectIntervalRef.current = null;
+          }
           generateSong();
-          // Stop the interval from outside
-          if (collectIntervalRef.current) {
-            clearInterval(collectIntervalRef.current);
-            collectIntervalRef.current = null;
-          }
-          return next;
-        }
-
-        // At 60s: generate with whatever we have (duplicate if needed)
-        if (next === WINDOW_SEC * 2) {
-          if (collectIntervalRef.current) {
-            clearInterval(collectIntervalRef.current);
-            collectIntervalRef.current = null;
-          }
-          if (oneHasData && !generatingRef.current) {
-            setGenerationStatus("Sending with 1 ring data (duplicate)");
-            generateSong();
-          } else if (!generatingRef.current) {
-            setGenerationStatus("No data from any ring");
-          }
         }
 
         return next;
@@ -468,6 +442,8 @@ export default function Home() {
             connectionRef={ring1Ref}
             mockMode={mockMode}
             mockData={mockRing1Data}
+            genre={genre1}
+            onGenreChange={setGenre1}
           />
           <RingCard
             personId={2}
@@ -478,14 +454,20 @@ export default function Home() {
             connectionRef={ring2Ref}
             mockMode={mockMode}
             mockData={mockRing2Data}
+            genre={genre2}
+            onGenreChange={setGenre2}
           />
         </div>
+
+        <p className="text-center text-sm text-zinc-400">
+          Suno style: <span className="text-white">{buildPrompt(genre1, genre2).style}</span>
+        </p>
 
         {/* Session panel */}
         <SessionPanel
           isActive={isActive}
-          collectSeconds={Math.min(collectSeconds, WINDOW_SEC * 2)}
-          windowSeconds={WINDOW_SEC * 2}
+          collectSeconds={Math.min(collectSeconds, WINDOW_SEC)}
+          windowSeconds={WINDOW_SEC}
           status={generationStatus || (isActive ? "Collecting..." : "")}
         />
 

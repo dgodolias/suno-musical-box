@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { insertSong } from "@/lib/db";
 
+// V6 defaults to 20s clips when duration is omitted
+const SONG_DURATION_SEC = 60;
+
 export async function POST(request: Request) {
   const body = await request.json();
   const { sessionId, prompt, style, snapshot } = body;
@@ -21,13 +24,12 @@ export async function POST(request: Request) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      prompt,
       style,
       title: `Musical Box`,
       customMode: true,
       instrumental: true,
-      model: "V4_5",
-      negativeTags: "noise, static, hiss, distortion, lo-fi, raw, demo",
+      model: "V6",
+      duration: SONG_DURATION_SEC,
       callBackUrl: "https://example.com/callback",
     }),
   });

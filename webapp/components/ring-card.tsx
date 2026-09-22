@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import GenrePicker from "@/components/genre-picker";
 import {
   RingConnection,
   type ConnectionState,
@@ -19,6 +20,8 @@ interface RingCardProps {
   connectionRef?: React.MutableRefObject<RingConnection | null>;
   mockMode?: boolean;
   mockData?: RingData | null;
+  genre: string | null;
+  onGenreChange: (genre: string | null) => void;
 }
 
 export default function RingCard({
@@ -30,6 +33,8 @@ export default function RingCard({
   connectionRef,
   mockMode = false,
   mockData = null,
+  genre,
+  onGenreChange,
 }: RingCardProps) {
   const [state, setState] = useState<ConnectionState>("disconnected");
   const [data, setData] = useState<RingData>({
@@ -163,6 +168,8 @@ export default function RingCard({
               {isLoading ? "Searching..." : "Scan & Connect"}
             </Button>
           )}
+
+          <GenrePicker value={genre} onChange={onGenreChange} />
         </div>
       </CardContent>
     </Card>
