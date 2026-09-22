@@ -12,9 +12,9 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Missing prompt or style" }, { status: 400 });
   }
 
-  const apiKey = request.headers.get("x-suno-key") || process.env.SUNO_API_KEY;
+  const apiKey = process.env.SUNO_API_KEY;
   if (!apiKey) {
-    return NextResponse.json({ error: "No Suno API key. Set one in Settings." }, { status: 500 });
+    return NextResponse.json({ error: "SUNO_API_KEY is not set" }, { status: 500 });
   }
 
   const response = await fetch("https://apibox.erweima.ai/api/v1/generate", {

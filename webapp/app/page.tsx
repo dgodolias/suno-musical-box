@@ -56,11 +56,6 @@ function generateMockReading(personId: 1 | 2, t: number): BiometricReading {
   };
 }
 
-function loadSunoKey(): string {
-  if (typeof window === "undefined") return "";
-  return localStorage.getItem("musical-box-suno-key") || "";
-}
-
 export default function Home() {
   const [sessionId, setSessionId] = useState<number | null>(null);
   const [isActive, setIsActive] = useState(false);
@@ -74,8 +69,6 @@ export default function Home() {
   const [ring1Connected, setRing1Connected] = useState(false);
   const [ring2Connected, setRing2Connected] = useState(false);
   const [mockMode, setMockMode] = useState(false);
-  const [sunoKey, setSunoKey] = useState(loadSunoKey);
-  const [showSettings, setShowSettings] = useState(false);
   const [mockRing1Data, setMockRing1Data] = useState<RingData | null>(null);
   const [mockRing2Data, setMockRing2Data] = useState<RingData | null>(null);
   const [genre1, setGenre1] = useState<string | null>(null);
@@ -184,9 +177,7 @@ export default function Home() {
       for (let i = 0; i < 30; i++) {
         await new Promise((r) => setTimeout(r, 10000));
         try {
-          const headers: Record<string, string> = {};
-          if (sunoKey) headers["x-suno-key"] = sunoKey;
-          const res = await fetch(`/api/generate/${taskId}`, { headers });
+          const res = await fetch(`/api/generate/${taskId}`);
           const data = await res.json();
 
           if (data.status === "ready" && data.audioUrl) {
@@ -238,11 +229,9 @@ export default function Home() {
     setGenerationStatus("Submitting to Suno...");
 
     try {
-      const fetchHeaders: Record<string, string> = { "Content-Type": "application/json" };
-      if (sunoKey) fetchHeaders["x-suno-key"] = sunoKey;
       const res = await fetch("/api/generate", {
         method: "POST",
-        headers: fetchHeaders,
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sessionId, prompt, style, snapshot: snap }),
       });
       const data = await res.json();
@@ -395,42 +384,6 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Settings */}
-        <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3">
-          <button
-            onClick={() => setShowSettings((s) => !s)}
-            className="flex w-full items-center justify-between text-sm"
-          >
-            <span className="font-medium">Settings</span>
-            <span className="text-zinc-500">{showSettings ? "▲" : "▼"}</span>
-          </button>
-          {showSettings && (
-            <div className="mt-3 space-y-2">
-              <label className="block text-xs text-zinc-400">
-                Suno API Key (optional — overrides server default)
-              </label>
-              <input
-                type="text"
-                value={sunoKey}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  setSunoKey(val);
-                  if (val) {
-                    localStorage.setItem("musical-box-suno-key", val);
-                  } else {
-                    localStorage.removeItem("musical-box-suno-key");
-                  }
-                }}
-                placeholder="Enter your API key from apibox.erweima.ai"
-                className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white placeholder-zinc-500 focus:border-emerald-500 focus:outline-none"
-              />
-              {sunoKey && (
-                <p className="text-xs text-emerald-500">Using your custom API key</p>
-              )}
-            </div>
-          )}
-        </div>
-
         {/* Ring cards */}
         <div className="grid grid-cols-2 gap-4">
           <RingCard
@@ -458,10 +411,6 @@ export default function Home() {
             onGenreChange={setGenre2}
           />
         </div>
-
-        <p className="text-center text-sm text-zinc-400">
-          Suno style: <span className="text-white">{buildPrompt(genre1, genre2).style}</span>
-        </p>
 
         {/* Session panel */}
         <SessionPanel

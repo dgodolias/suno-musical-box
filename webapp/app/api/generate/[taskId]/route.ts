@@ -6,10 +6,10 @@ export async function GET(
   { params }: { params: Promise<{ taskId: string }> }
 ) {
   const { taskId } = await params;
-  const apiKey = request.headers.get("x-suno-key") || process.env.SUNO_API_KEY;
+  const apiKey = process.env.SUNO_API_KEY;
 
   if (!apiKey) {
-    return NextResponse.json({ error: "No Suno API key" }, { status: 500 });
+    return NextResponse.json({ error: "SUNO_API_KEY is not set" }, { status: 500 });
   }
 
   const response = await fetch(
