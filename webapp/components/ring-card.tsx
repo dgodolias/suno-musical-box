@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import GenrePicker from "@/components/genre-picker";
-import { Bluetooth, HeartPulse } from "lucide-react";
+import { Bluetooth, HeartPulse, UserRound } from "lucide-react";
 import {
   RingConnection,
   type ConnectionState,
@@ -109,13 +109,13 @@ export default function RingCard({
       <CardHeader>
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-3">
-            {/* Sticker-style number tile, like the platform's persona steps */}
+            {/* Sticker-style person tile, like the platform's persona steps */}
             <span
-              className={`flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary font-display text-lg font-bold text-primary-foreground shadow-sticker-sm ${
+              className={`flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-sticker-sm ${
                 personId === 1 ? "-rotate-6" : "rotate-6"
               }`}
             >
-              {personId}
+              <UserRound className="size-5" strokeWidth={2.25} />
             </span>
             <div>
               <CardTitle className="font-display text-lg font-bold">{label}</CardTitle>

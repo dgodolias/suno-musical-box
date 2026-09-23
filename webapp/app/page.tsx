@@ -372,8 +372,9 @@ export default function Home() {
         {/* Brand bar */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <Image src="/brand/mascot.png" alt="" width={40} height={40} priority />
-            <span className="font-display text-xl font-bold tracking-tight">
+            {/* Same as educoach-platform's <Logo showIcon />: logo-v3 + text wordmark */}
+            <Image src="/brand/logo.png" alt="" width={36} height={36} priority className="rounded-lg" />
+            <span className="font-display text-2xl font-bold tracking-tight">
               Edu<span className="text-primary">Coach</span>
             </span>
           </div>
@@ -394,13 +395,14 @@ export default function Home() {
                 onClick={startSession}
                 variant="3d-primary"
                 size="lg"
+                className="h-12 px-7 text-base"
                 disabled={!anyConnected}
                 title={!anyConnected ? "Connect at least one ring" : ""}
               >
                 Start Session
               </Button>
             ) : (
-              <Button onClick={stopSession} variant="destructive" size="lg">
+              <Button onClick={stopSession} variant="destructive" size="lg" className="h-12 rounded-2xl px-7 text-base font-bold uppercase tracking-widest">
                 Stop
               </Button>
             )}
