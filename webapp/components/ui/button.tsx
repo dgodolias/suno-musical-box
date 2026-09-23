@@ -18,6 +18,11 @@ const buttonVariants = cva(
         destructive:
           "bg-destructive/10 text-destructive hover:bg-destructive/20 focus-visible:border-destructive/40 focus-visible:ring-destructive/20 dark:bg-destructive/20 dark:hover:bg-destructive/30 dark:focus-visible:ring-destructive/40",
         link: "text-primary underline-offset-4 hover:underline",
+        // From educoach-platform's button: chunky pressable CTA.
+        "3d-primary":
+          "bg-primary text-primary-foreground font-bold tracking-widest uppercase rounded-2xl border-b-4 border-b-black/15 active:border-b-0 active:translate-y-1 hover:bg-primary/90",
+        "3d-secondary":
+          "bg-background text-primary font-bold tracking-widest uppercase rounded-2xl border-2 border-border border-b-4 active:border-b-2 active:translate-y-1 hover:bg-accent",
       },
       size: {
         default:

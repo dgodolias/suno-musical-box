@@ -20,9 +20,9 @@ export default function SessionPanel({
   if (!isActive) return null;
 
   return (
-    <div className="space-y-4 rounded-xl border border-zinc-800 bg-zinc-950/50 p-5">
+    <div className="space-y-4 rounded-2xl border border-border/60 bg-card shadow-sticker p-6">
       <div className="flex items-center justify-between">
-        <h3 className="font-semibold">Session</h3>
+        <h3 className="font-display text-lg font-bold">Session</h3>
         <span className="text-sm text-muted-foreground">{status}</span>
       </div>
 

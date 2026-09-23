@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 .env
+*.env
+!.env.example
 audio_cache/*.mp3
 audio_cache/*.wav
 .venv/

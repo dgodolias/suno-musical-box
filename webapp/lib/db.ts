@@ -80,3 +80,14 @@ export async function updateSongAudio(
     WHERE suno_song_id = ${sunoTaskId}
   `;
 }
+
+/** The finished song's audio URL — the same clip the UI played — or null if not ready. */
+export async function getSongAudioUrl(sunoTaskId: string): Promise<string | null> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT audio_url FROM generated_songs
+    WHERE suno_song_id = ${sunoTaskId} AND audio_url <> ''
+    LIMIT 1
+  `;
+  return rows[0]?.audio_url ?? null;
+}

@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import GenrePicker from "@/components/genre-picker";
+import { Bluetooth, HeartPulse } from "lucide-react";
 import {
   RingConnection,
   type ConnectionState,
@@ -99,78 +100,95 @@ export default function RingCard({
 
   return (
     <Card
-      className={`transition-all duration-300 ${
+      className={`gap-5 transition-all duration-300 ${
         isConnected
-          ? "border-emerald-500/50 shadow-lg shadow-emerald-500/10"
-          : "border-zinc-800"
+          ? "rounded-2xl border border-primary/40 shadow-sticker ring-0"
+          : "rounded-2xl border border-border/60 shadow-sticker-muted ring-0"
       }`}
     >
-      <CardHeader className="pb-3">
-        <div className="flex items-center justify-between">
-          <CardTitle className="text-lg">{label}</CardTitle>
+      <CardHeader>
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-center gap-3">
+            {/* Sticker-style number tile, like the platform's persona steps */}
+            <span
+              className={`flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary font-display text-lg font-bold text-primary-foreground shadow-sticker-sm ${
+                personId === 1 ? "-rotate-6" : "rotate-6"
+              }`}
+            >
+              {personId}
+            </span>
+            <div>
+              <CardTitle className="font-display text-lg font-bold">{label}</CardTitle>
+              <p className="text-sm text-muted-foreground">Wears the size {size} ring</p>
+            </div>
+          </div>
           <Badge
-            variant={isConnected ? "default" : "secondary"}
-            className={isConnected ? "bg-emerald-600 hover:bg-emerald-600" : ""}
+            variant="secondary"
+            className={isConnected ? "bg-success/15 text-success" : ""}
           >
             {isConnected && (
-              <span className="mr-1.5 inline-block h-2 w-2 rounded-full bg-emerald-300 animate-pulse" />
+              <span className="inline-block size-2 rounded-full bg-success animate-pulse" />
             )}
             {mockMode && "Mock"}
-            {!mockMode && state === "disconnected" && "Disconnected"}
+            {!mockMode && state === "disconnected" && "Not connected"}
             {!mockMode && state === "scanning" && "Scanning..."}
             {!mockMode && state === "connecting" && "Connecting..."}
             {!mockMode && state === "connected" && "Connected"}
           </Badge>
         </div>
-        <div className="flex items-center justify-between">
-          <p className="text-sm text-muted-foreground">
-            Size {size}
-            {displayName && ` — ${displayName}`}
-          </p>
+      </CardHeader>
+
+      <CardContent className="space-y-5">
+        {/* Heart rate */}
+        <div className="flex items-center gap-4 rounded-xl border border-border/60 bg-background px-4 py-3">
+          <HeartPulse
+            className={`size-8 shrink-0 ${data.heartRate !== null ? "text-primary" : "text-muted-foreground/40"}`}
+            strokeWidth={1.75}
+          />
+          <div className="flex items-baseline gap-1.5">
+            <span
+              className={`font-display text-4xl font-bold tabular-nums ${
+                data.heartRate !== null ? "text-foreground" : "text-muted-foreground/40"
+              }`}
+            >
+              {data.heartRate !== null ? data.heartRate : "--"}
+            </span>
+            <span className="text-sm font-medium text-muted-foreground">BPM</span>
+          </div>
           {data.batteryLevel !== null && (
-            <span className={`text-xs ${data.batteryLevel < 20 ? "text-red-400" : "text-zinc-400"}`}>
+            <span
+              className={`ml-auto text-xs ${data.batteryLevel < 20 ? "text-destructive" : "text-muted-foreground"}`}
+            >
               🔋 {data.batteryLevel}%{data.isCharging ? " ⚡" : ""}
             </span>
           )}
         </div>
-      </CardHeader>
-      <CardContent>
-        <div className="space-y-3">
-          {/* Heart Rate — big and centered */}
-          <div className="rounded-xl bg-zinc-900/50 py-4 text-center">
-            <div className={`text-4xl font-bold tabular-nums ${data.heartRate !== null ? "text-red-400" : "text-zinc-600"}`}>
-              {data.heartRate !== null ? data.heartRate : "--"}
-            </div>
-            <div className="text-xs text-muted-foreground mt-1">♥ BPM</div>
-          </div>
 
-          {/* Action button */}
-          {mockMode ? (
-            <div className="text-center text-xs text-zinc-500 py-1">
-              Mock data active
-            </div>
-          ) : isConnected ? (
-            <Button
-              variant="outline"
-              size="sm"
-              className="w-full"
-              onClick={handleDisconnect}
-            >
+        <GenrePicker value={genre} onChange={onGenreChange} />
+
+        {/* Connection */}
+        {mockMode ? (
+          <p className="text-center text-xs text-muted-foreground">
+            Mock data · {displayName}
+          </p>
+        ) : isConnected ? (
+          <div className="flex items-center justify-between gap-2">
+            <span className="truncate text-xs text-muted-foreground">{displayName}</span>
+            <Button variant="ghost" size="sm" onClick={handleDisconnect}>
               Disconnect
             </Button>
-          ) : (
-            <Button
-              size="sm"
-              className="w-full"
-              onClick={handleScan}
-              disabled={isLoading}
-            >
-              {isLoading ? "Searching..." : "Scan & Connect"}
-            </Button>
-          )}
-
-          <GenrePicker value={genre} onChange={onGenreChange} />
-        </div>
+          </div>
+        ) : (
+          <Button
+            variant="3d-secondary"
+            className="h-10 w-full"
+            onClick={handleScan}
+            disabled={isLoading}
+          >
+            <Bluetooth />
+            {isLoading ? "Searching..." : "Connect ring"}
+          </Button>
+        )}
       </CardContent>
     </Card>
   );
@@ -190,7 +208,7 @@ function MetricBox({
   color: string;
 }) {
   return (
-    <div className="rounded-lg bg-zinc-900/50 p-3 text-center">
+    <div className="rounded-lg bg-background p-3 text-center">
       <div className={`text-2xl font-bold tabular-nums ${color}`}>
         {value !== null ? value : "--"}
       </div>

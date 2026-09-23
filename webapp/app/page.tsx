@@ -1,10 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Button } from "@/components/ui/button";
 import RingCard from "@/components/ring-card";
 import SessionPanel from "@/components/session-panel";
 import MusicPlayer from "@/components/music-player";
+import Image from "next/image";
+import FloatingIcons from "@/components/floating-icons";
+import ThemeToggle from "@/components/theme-toggle";
 import { type RingData, RingConnection } from "@/lib/ble/ring-manager";
 import {
   type BiometricReading,
@@ -16,6 +19,7 @@ import { buildPrompt } from "@/lib/prompt-builder";
 const WINDOW_SEC = 30;
 
 interface Song {
+  taskId: string;
   audioUrl: string;
   style: string;
   prompt: string;
@@ -56,6 +60,11 @@ function generateMockReading(personId: 1 | 2, t: number): BiometricReading {
   };
 }
 
+// Local testing without rings: open /?mock (ignored in production builds)
+const noopSubscribe = () => () => {};
+const readMockFlag = () =>
+  process.env.NODE_ENV !== "production" && new URLSearchParams(window.location.search).has("mock");
+
 export default function Home() {
   const [sessionId, setSessionId] = useState<number | null>(null);
   const [isActive, setIsActive] = useState(false);
@@ -68,7 +77,7 @@ export default function Home() {
   const generatingRef = useRef(false);
   const [ring1Connected, setRing1Connected] = useState(false);
   const [ring2Connected, setRing2Connected] = useState(false);
-  const [mockMode, setMockMode] = useState(false);
+  const mockMode = useSyncExternalStore(noopSubscribe, readMockFlag, () => false);
   const [mockRing1Data, setMockRing1Data] = useState<RingData | null>(null);
   const [mockRing2Data, setMockRing2Data] = useState<RingData | null>(null);
   const [genre1, setGenre1] = useState<string | null>(null);
@@ -184,6 +193,7 @@ export default function Home() {
             clearInterval(progressInterval);
             setGenerationProgress(100);
             const song: Song = {
+              taskId,
               audioUrl: data.audioUrl,
               style,
               prompt,
@@ -356,13 +366,25 @@ export default function Home() {
   }, [isActive, mockMode, sendReadingsToApi, generateSong]);
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-white">
-      <div className="mx-auto max-w-2xl px-4 py-8 space-y-6">
+    <div className="relative min-h-screen bg-background text-foreground">
+      <FloatingIcons />
+      <div className="relative mx-auto max-w-2xl px-4 py-10 space-y-8">
+        {/* Brand bar */}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <Image src="/brand/mascot.png" alt="" width={40} height={40} priority />
+            <span className="font-display text-xl font-bold tracking-tight">
+              Edu<span className="text-primary">Coach</span>
+            </span>
+          </div>
+          <ThemeToggle />
+        </div>
+
         {/* Header */}
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold tracking-tight">Musical Box</h1>
-            <p className="text-sm text-zinc-400">
+            <h1 className="font-display text-3xl font-bold tracking-tight">Musical Box</h1>
+            <p className="text-sm text-muted-foreground">
               Biometric-driven music generation
             </p>
           </div>
@@ -370,6 +392,7 @@ export default function Home() {
             {!isActive ? (
               <Button
                 onClick={startSession}
+                variant="3d-primary"
                 size="lg"
                 disabled={!anyConnected}
                 title={!anyConnected ? "Connect at least one ring" : ""}
@@ -385,7 +408,7 @@ export default function Home() {
         </div>
 
         {/* Ring cards */}
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
           <RingCard
             personId={1}
             label="Person 1"
@@ -430,7 +453,7 @@ export default function Home() {
         />
 
         {/* Footer */}
-        <p className="text-center text-xs text-zinc-600">
+        <p className="text-center text-xs text-muted-foreground">
           Requires Chrome/Edge with Bluetooth. Colmi R02 rings.
         </p>
       </div>

@@ -3,8 +3,10 @@
 import { useRef, useState, useEffect } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import SendSongForm from "@/components/send-song-form";
 
 interface Song {
+  taskId: string;
   audioUrl: string;
   style: string;
   prompt: string;
@@ -45,11 +47,11 @@ export default function MusicPlayer({
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       {/* Now playing */}
-      <div className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-5 space-y-4">
+      <div className="rounded-2xl border border-border/60 bg-card shadow-sticker p-6 space-y-4">
         <div className="flex items-center justify-between">
-          <h3 className="font-semibold">Now Playing</h3>
+          <h3 className="font-display text-lg font-bold">Now Playing</h3>
           {generationStatus && (
             <Badge variant="secondary" className="text-xs">
               {generationStatus}
@@ -88,9 +90,9 @@ export default function MusicPlayer({
             />
 
             <div className="space-y-2">
-              <div className="relative h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+              <div className="relative h-1.5 bg-muted rounded-full overflow-hidden">
                 <div
-                  className="absolute h-full bg-emerald-500 rounded-full transition-all duration-300"
+                  className="absolute h-full bg-primary rounded-full transition-all duration-300"
                   style={{
                     width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%`,
                   }}
@@ -104,7 +106,7 @@ export default function MusicPlayer({
 
             <div className="flex items-center gap-4">
               <button
-                className="text-sm text-muted-foreground hover:text-white transition"
+                className="text-sm font-medium text-primary hover:text-primary/80 transition"
                 onClick={() => {
                   if (audioRef.current) {
                     isPlaying
@@ -115,16 +117,9 @@ export default function MusicPlayer({
               >
                 {isPlaying ? "⏸ Pause" : "▶ Play"}
               </button>
-              <a
-                href={currentSong.audioUrl}
-                download={`musical-box-${currentSong.number}.mp3`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-sm text-emerald-400 hover:text-emerald-300 transition"
-              >
-                ⬇ Download
-              </a>
             </div>
+
+            <SendSongForm key={currentSong.taskId} taskId={currentSong.taskId} />
           </>
         ) : (
           <div className="space-y-3">
@@ -133,13 +128,13 @@ export default function MusicPlayer({
             </p>
             {generationProgress > 0 && generationProgress < 100 && (
               <div className="space-y-1.5">
-                <div className="relative h-2 bg-zinc-800 rounded-full overflow-hidden">
+                <div className="relative h-2 bg-muted rounded-full overflow-hidden">
                   <div
-                    className="absolute h-full bg-emerald-500 rounded-full transition-all duration-500 ease-out"
+                    className="absolute h-full bg-primary rounded-full transition-all duration-500 ease-out"
                     style={{ width: `${generationProgress}%` }}
                   />
                 </div>
-                <div className="text-xs text-zinc-500 text-right tabular-nums">
+                <div className="text-xs text-muted-foreground text-right tabular-nums">
                   {generationProgress}%
                 </div>
               </div>
@@ -150,10 +145,10 @@ export default function MusicPlayer({
 
       {/* History */}
       {history.length > 0 && (
-        <div className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-5 space-y-3">
-          <h3 className="font-semibold text-sm">History</h3>
+        <div className="rounded-2xl border border-border/60 bg-card shadow-sticker-muted p-6 space-y-3">
+          <h3 className="font-display font-bold text-sm">History</h3>
           {history.map((song, idx) => (
-            <Card key={`${song.number}-${idx}`} className="bg-zinc-900/50 border-zinc-800">
+            <Card key={`${song.number}-${idx}`} className="bg-background">
               <CardContent className="p-3 flex items-center justify-between">
                 <div className="text-sm">
                   <span className="font-medium">Song #{song.number}</span>
@@ -161,7 +156,7 @@ export default function MusicPlayer({
                 </div>
                 <div className="flex items-center gap-3">
                   <button
-                    className="text-xs text-emerald-400 hover:text-emerald-300"
+                    className="text-xs font-medium text-primary hover:text-primary/80"
                     onClick={() => {
                       if (audioRef.current) {
                         audioRef.current.src = song.audioUrl;
@@ -171,15 +166,6 @@ export default function MusicPlayer({
                   >
                     ▶ Play
                   </button>
-                  <a
-                    href={song.audioUrl}
-                    download={`musical-box-${song.number}.mp3`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-xs text-zinc-500 hover:text-zinc-300"
-                  >
-                    ⬇
-                  </a>
                 </div>
               </CardContent>
             </Card>
