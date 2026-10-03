@@ -1,12 +1,15 @@
 "use client";
 
+import type { RefObject } from "react";
 import { Progress } from "@/components/ui/progress";
+import Waveform, { type LiveHeartRates } from "@/components/waveform";
 
 interface SessionPanelProps {
   isActive: boolean;
   collectSeconds: number;
   windowSeconds: number;
   status: string;
+  heartRatesRef: RefObject<LiveHeartRates>;
 }
 
 export default function SessionPanel({
@@ -14,6 +17,7 @@ export default function SessionPanel({
   collectSeconds,
   windowSeconds,
   status,
+  heartRatesRef,
 }: SessionPanelProps) {
   const progress = Math.min(100, (collectSeconds / windowSeconds) * 100);
 
@@ -25,6 +29,8 @@ export default function SessionPanel({
         <h3 className="font-display text-lg font-bold">Session</h3>
         <span className="text-sm text-muted-foreground">{status}</span>
       </div>
+
+      <Waveform heartRatesRef={heartRatesRef} />
 
       <div className="space-y-1.5">
         <div className="flex justify-between text-sm text-muted-foreground">

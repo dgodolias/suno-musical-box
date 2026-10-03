@@ -8,6 +8,7 @@ import MusicPlayer from "@/components/music-player";
 import Image from "next/image";
 import FloatingIcons from "@/components/floating-icons";
 import ThemeToggle from "@/components/theme-toggle";
+import type { LiveHeartRates } from "@/components/waveform";
 import { type RingData, RingConnection } from "@/lib/ble/ring-manager";
 import {
   type BiometricReading,
@@ -86,6 +87,8 @@ export default function Home() {
   const ring1Ref = useRef<RingConnection | null>(null);
   const ring2Ref = useRef<RingConnection | null>(null);
   const readingsRef = useRef<BiometricReading[]>([]);
+  // Latest heart rate per person; the session waveform reads it every frame
+  const liveHrRef = useRef<LiveHeartRates>([null, null]);
   const collectIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const mockTickRef = useRef(0);
 
@@ -109,6 +112,7 @@ export default function Home() {
       // Always store readings (even before session starts)
       // so we have data ready when generation triggers
       if (data.heartRate === null) return; // skip empty readings
+      liveHrRef.current[personId - 1] = data.heartRate;
       readingsRef.current.push({
         personId,
         timestamp: Date.now(),
@@ -128,6 +132,13 @@ export default function Home() {
     },
     []
   );
+
+  const handleConnectionChange = useCallback((personId: 1 | 2, connected: boolean) => {
+    if (personId === 1) setRing1Connected(connected);
+    else setRing2Connected(connected);
+    // A ring that is not connected stops driving the waveform
+    if (!connected) liveHrRef.current[personId - 1] = null;
+  }, []);
 
   const sendReadingsToApi = useCallback(
     async (readings: BiometricReading[]) => {
@@ -308,6 +319,7 @@ export default function Home() {
         const r1 = generateMockReading(1, t);
         const r2 = generateMockReading(2, t);
         readingsRef.current.push(r1, r2);
+        liveHrRef.current = [r1.heartRate, r2.heartRate];
 
         setMockRing1Data({
           heartRate: r1.heartRate,
@@ -416,7 +428,7 @@ export default function Home() {
             label="Person 1"
             size="9"
             onData={addReading}
-            onConnectionChange={(_, connected) => setRing1Connected(connected)}
+            onConnectionChange={handleConnectionChange}
             connectionRef={ring1Ref}
             mockMode={mockMode}
             mockData={mockRing1Data}
@@ -428,7 +440,7 @@ export default function Home() {
             label="Person 2"
             size="11"
             onData={addReading}
-            onConnectionChange={(_, connected) => setRing2Connected(connected)}
+            onConnectionChange={handleConnectionChange}
             connectionRef={ring2Ref}
             mockMode={mockMode}
             mockData={mockRing2Data}
@@ -443,6 +455,7 @@ export default function Home() {
           collectSeconds={Math.min(collectSeconds, WINDOW_SEC)}
           windowSeconds={WINDOW_SEC}
           status={generationStatus || (isActive ? "Collecting..." : "")}
+          heartRatesRef={liveHrRef}
         />
 
         {/* Music player */}
