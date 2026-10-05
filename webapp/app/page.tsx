@@ -14,25 +14,13 @@ import type { BiometricReading } from "@/lib/biometrics";
 import { computeSnapshot } from "@/lib/biometrics";
 import { buildPrompt } from "@/lib/prompt-builder";
 
+import { EMPTY_SYNC_STATUS, RecordingOutbox } from "@/lib/recording-outbox";
+import type { RecordedReading, RecordingSession } from "@/lib/recording-outbox";
+
 const WINDOW_SEC = 30;
-const UPLOAD_INTERVAL_MS = 5000;
-const UPLOAD_RETRY_MS = 15000;
-const UPLOAD_BATCH_SIZE = 1000;
-const UPLOAD_TIMEOUT_MS = 15000;
+const CURRENT_SESSION_KEY = "musical-box-current-session";
 const SUNO_DISABLED = process.env.NEXT_PUBLIC_SUNO_DISABLED === "true";
 const SUNO_PAUSED_MESSAGE = "Music generation paused for ring tests";
-
-interface CollectionWindow {
-  sessionId: number;
-  startedAt: number;
-  endsAt: number;
-  collecting: boolean;
-}
-
-interface PendingReadings {
-  readings: BiometricReading[];
-  retryAfter: number;
-}
 
 interface Song {
   taskId: string;
@@ -82,16 +70,17 @@ const readMockFlag = () =>
   process.env.NODE_ENV !== "production" && new URLSearchParams(window.location.search).has("mock");
 
 export default function Home() {
-  const [sessionId, setSessionId] = useState<number | null>(null);
+  const [clientSessionId, setClientSessionId] = useState<string | null>(null);
   const [isActive, setIsActive] = useState(false);
-  const [collectSeconds, setCollectSeconds] = useState(0);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [endPersisted, setEndPersisted] = useState(false);
   const [generationStatus, setGenerationStatus] = useState("");
   const [currentSong, setCurrentSong] = useState<Song | null>(null);
-  const [history, setHistory] = useState<Song[]>([]);
-  const [songCount, setSongCount] = useState(0);
   const [generationProgress, setGenerationProgress] = useState(0);
-  const generatingRef = useRef(false);
-  const generationRunRef = useRef(0);
+  const [playerEpoch, setPlayerEpoch] = useState(0);
+  const [sync, setSync] = useState(EMPTY_SYNC_STATUS);
+  const [initialized, setInitialized] = useState(false);
+  const [sessionError, setSessionError] = useState("");
   const [ring1Connected, setRing1Connected] = useState(false);
   const [ring2Connected, setRing2Connected] = useState(false);
   const mockMode = useSyncExternalStore(noopSubscribe, readMockFlag, () => false);
@@ -102,370 +91,298 @@ export default function Home() {
 
   const ring1Ref = useRef<RingConnection | null>(null);
   const ring2Ref = useRef<RingConnection | null>(null);
-  const readingsRef = useRef<BiometricReading[]>([]);
-  const collectionRef = useRef<CollectionWindow | null>(null);
-  const pendingReadingsRef = useRef(new Map<number, PendingReadings>());
-  const uploadingRef = useRef(false);
+  const outboxRef = useRef<RecordingOutbox | null>(null);
+  const activeSessionRef = useRef<RecordingSession | null>(null);
   const startingSessionRef = useRef(false);
-  // Latest heart rate per person; the session waveform reads it every frame
+  const endingSessionRef = useRef(false);
+  const startingReadingsRef = useRef<{ startedAt: number; readings: RecordedReading[] } | null>(null);
+  const generatingRef = useRef(false);
+  const generationRunRef = useRef(0);
   const liveHrRef = useRef<LiveHeartRates>([null, null]);
-  const collectIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const mockTickRef = useRef(0);
-
   const anyConnected = mockMode || ring1Connected || ring2Connected;
+
+  useEffect(() => {
+    const outbox = outboxRef.current ?? new RecordingOutbox();
+    outboxRef.current = outbox;
+    const generationRun = generationRunRef;
+    let mounted = true;
+    let localWrites = 0;
+    const unsubscribe = outbox.subscribe((status) => {
+      localWrites = status.localWrites;
+      if (mounted) setSync(status);
+    });
+    const protectUnsavedMeasurements = (event: BeforeUnloadEvent) => {
+      if (localWrites === 0 && !endingSessionRef.current && !startingReadingsRef.current?.readings.length) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", protectUnsavedMeasurements);
+    void (async () => {
+      try {
+        await outbox.initialize();
+        const previousId = sessionStorage.getItem(CURRENT_SESSION_KEY);
+        const previous = previousId ? await outbox.getSession(previousId) : undefined;
+        if (!mounted) return;
+        if (previous && !previous.retired) {
+          activeSessionRef.current = previous;
+          setClientSessionId(previous.clientSessionId);
+          setGenre1(previous.genre1);
+          setGenre2(previous.genre2);
+          setElapsedSeconds(Math.floor(((previous.endedAt ?? Date.now()) - previous.startedAt) / 1000));
+          setIsActive(previous.endedAt === null);
+          setEndPersisted(previous.endedAt !== null);
+          generatingRef.current = previous.generationAttempted;
+          if (previous.endedAt === null) {
+            setGenerationStatus(SUNO_DISABLED ? SUNO_PAUSED_MESSAGE : previous.generationAttempted
+              ? "Recording resumed. Music was interrupted; stop before starting a new session."
+              : "Recording biometric data...");
+          }
+        }
+        setInitialized(true);
+        void outbox.flush();
+      } catch (error) {
+        if (mounted) setSessionError("Local recording storage: " + String(error));
+      }
+    })();
+    const timer = setInterval(() => void outbox.flush(), 5000);
+    return () => {
+      mounted = false;
+      unsubscribe();
+      clearInterval(timer);
+      window.removeEventListener("beforeunload", protectUnsavedMeasurements);
+      generationRun.current++;
+    };
+  }, []);
 
   const recordReading = useCallback((reading: BiometricReading) => {
     liveHrRef.current[reading.personId - 1] = reading.heartRate;
-    const collection = collectionRef.current;
-    if (
-      !collection?.collecting ||
-      reading.timestamp < collection.startedAt ||
-      reading.timestamp > collection.endsAt
-    ) return;
-
-    readingsRef.current.push(reading);
-    let pending = pendingReadingsRef.current.get(collection.sessionId);
-    if (!pending) {
-      pending = { readings: [], retryAfter: 0 };
-      pendingReadingsRef.current.set(collection.sessionId, pending);
+    const session = activeSessionRef.current;
+    if (!session) {
+      const starting = startingReadingsRef.current;
+      if (starting && reading.timestamp >= starting.startedAt) {
+        starting.readings.push({ ...reading, sampleId: crypto.randomUUID() });
+      }
+      return;
     }
-    pending.readings.push(reading);
+    if (session.endedAt !== null || reading.timestamp < session.startedAt) return;
+    void outboxRef.current?.append(session.clientSessionId, { ...reading, sampleId: crypto.randomUUID() })
+      .catch((error) => setSessionError("Could not retain measurement: " + String(error)));
   }, []);
 
-  const addReading = useCallback(
-    (personId: 1 | 2, data: RingData) => {
-      if (data.heartRate === null) return;
-      recordReading({
-        personId,
-        timestamp: data.lastUpdate,
-        heartRate: data.heartRate,
-        spo2: data.spo2,
-        temperature: null,
-        hrv: null,
-        rawPpg: data.rawPpg,
-        accelX: data.accelX,
-        accelY: data.accelY,
-        accelZ: data.accelZ,
-      });
-    },
-    [recordReading]
-  );
+  const addReading = useCallback((personId: 1 | 2, data: RingData) => {
+    if (data.heartRate === null) return;
+    recordReading({
+      personId, timestamp: data.lastUpdate, heartRate: data.heartRate,
+      spo2: data.spo2, temperature: null, hrv: null, rawPpg: data.rawPpg,
+      accelX: data.accelX, accelY: data.accelY, accelZ: data.accelZ,
+    });
+  }, [recordReading]);
 
   const handleConnectionChange = useCallback((personId: 1 | 2, connected: boolean) => {
     if (personId === 1) setRing1Connected(connected);
     else setRing2Connected(connected);
-    // A ring that is not connected stops driving the waveform
     if (!connected) liveHrRef.current[personId - 1] = null;
   }, []);
 
-  const sendReadingsToApi = useCallback(async () => {
-    if (uploadingRef.current) return;
-    uploadingRef.current = true;
+  const finishSession = useCallback(async () => {
+    const session = activeSessionRef.current;
+    const outbox = outboxRef.current;
+    if (!session || !outbox) return;
+    const endedAt = session.endedAt ?? Date.now();
+    // Stop accepting samples immediately; queued local writes precede this end marker.
+    session.endedAt = endedAt;
+    endingSessionRef.current = true;
+    generationRunRef.current++;
+    setIsActive(false);
+    setElapsedSeconds(Math.floor((endedAt - session.startedAt) / 1000));
     try {
-      for (const [pendingSessionId, pending] of pendingReadingsRef.current) {
-        if (pending.retryAfter > Date.now()) continue;
-        const batch = pending.readings.slice(0, UPLOAD_BATCH_SIZE);
-        if (batch.length === 0) continue;
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), UPLOAD_TIMEOUT_MS);
-        try {
-          const response = await fetch("/api/readings", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ sessionId: pendingSessionId, readings: batch }),
-            signal: controller.signal,
-          });
-          if (!response.ok) throw new Error(`Readings upload failed (${response.status})`);
-          pending.readings.splice(0, batch.length);
-          if (pending.readings.length === 0) pendingReadingsRef.current.delete(pendingSessionId);
-        } catch (err) {
-          pending.retryAfter = Date.now() + UPLOAD_RETRY_MS;
-          console.error("Failed to send readings:", err);
-        } finally {
-          clearTimeout(timeout);
-        }
+      await outbox.updateSession(session.clientSessionId, { endedAt });
+      endingSessionRef.current = false;
+      if (activeSessionRef.current?.clientSessionId === session.clientSessionId) {
+        setEndPersisted(true);
+        setSessionError("");
       }
-    } finally {
-      uploadingRef.current = false;
+      void outbox.flush();
+    } catch (error) {
+      setSessionError("Session end is not saved locally. Retry Stop: " + String(error));
     }
   }, []);
 
-  // Retries also run after collection ends; failed observations keep their session.
-  useEffect(() => {
-    const timer = setInterval(() => void sendReadingsToApi(), UPLOAD_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [sendReadingsToApi]);
-
-  const pollForSong = useCallback(
-    async (taskId: string, songNumber: number, prompt: string, style: string, generationRun: number) => {
-      if (SUNO_DISABLED || generationRunRef.current !== generationRun) return;
-      setGenerationStatus("Generating music...");
-      setGenerationProgress(0);
-
-      // Progress animation: smooth to ~90% over 120s, then slow crawl
-      const startTime = Date.now();
-      const progressInterval = setInterval(() => {
-        if (generationRunRef.current !== generationRun) {
-          clearInterval(progressInterval);
+  const pollForSong = useCallback(async (taskId: string, prompt: string, style: string, run: number) => {
+    if (SUNO_DISABLED || generationRunRef.current !== run) return;
+    setGenerationStatus("Generating music... Recording continues.");
+    const startedAt = Date.now();
+    const progressTimer = setInterval(() => {
+      if (generationRunRef.current !== run) { clearInterval(progressTimer); return; }
+      const elapsed = (Date.now() - startedAt) / 1000;
+      const progress = elapsed <= 108 ? elapsed / 108 * 90 : 90 + 9 * (elapsed - 108) / (elapsed - 78);
+      setGenerationProgress(Math.min(99, Math.round(progress)));
+    }, 500);
+    try {
+      for (let attempt = 0; attempt < 30; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 10000));
+        if (generationRunRef.current !== run) return;
+        const response = await fetch(`/api/generate/${taskId}`);
+        if (generationRunRef.current !== run) return;
+        if (response.status === 423) { setGenerationStatus(SUNO_PAUSED_MESSAGE); return; }
+        if (!response.ok) continue;
+        const data = await response.json();
+        if (generationRunRef.current !== run) return;
+        if (data.status === "ready" && data.audioUrl) {
+          setCurrentSong({ taskId, audioUrl: data.audioUrl, prompt, style, number: 1 });
+          setGenerationStatus("");
+          setGenerationProgress(100);
+          await finishSession();
           return;
-        }
-        const elapsed = (Date.now() - startTime) / 1000;
-        let progress: number;
-
-        if (elapsed <= 108) {
-          // 0-90% over first 108 seconds (linear)
-          progress = (elapsed / 108) * 90;
-        } else {
-          // 90-99% asymptotic slowdown: each extra 1% takes longer
-          // Never reaches 100% on its own
-          const extra = elapsed - 108;
-          progress = 90 + (9 * extra) / (extra + 30);
-        }
-
-        setGenerationProgress(Math.min(99, Math.round(progress)));
-      }, 500);
-
-      // Poll Suno for actual completion
-      for (let i = 0; i < 30; i++) {
-        await new Promise((r) => setTimeout(r, 10000));
-        if (generationRunRef.current !== generationRun) {
-          clearInterval(progressInterval);
-          return;
-        }
-        try {
-          const res = await fetch(`/api/generate/${taskId}`);
-          if (res.status === 423) {
-            clearInterval(progressInterval);
-            if (generationRunRef.current === generationRun) {
-              generatingRef.current = false;
-              setGenerationProgress(0);
-              setGenerationStatus(SUNO_PAUSED_MESSAGE);
-              setIsActive(false);
-            }
-            return;
-          }
-          const data = await res.json();
-          if (generationRunRef.current !== generationRun) {
-            clearInterval(progressInterval);
-            return;
-          }
-
-          if (data.status === "ready" && data.audioUrl) {
-            clearInterval(progressInterval);
-            setGenerationProgress(100);
-            const song: Song = {
-              taskId,
-              audioUrl: data.audioUrl,
-              style,
-              prompt,
-              number: songNumber,
-            };
-            setCurrentSong((prev) => {
-              if (prev) setHistory((h) => [prev, ...h]);
-              return song;
-            });
-            setGenerationStatus("");
-            setIsActive(false);
-            return;
-          }
-        } catch (err) {
-          if (generationRunRef.current !== generationRun) {
-            clearInterval(progressInterval);
-            return;
-          }
-          console.error("Poll error:", err);
         }
       }
-
-      clearInterval(progressInterval);
-      if (generationRunRef.current !== generationRun) return;
-      setGenerationProgress(0);
-      setGenerationStatus("Generation timed out");
-    },
-    []
-  );
+      if (generationRunRef.current === run) setGenerationStatus("Generation timed out. Recording continues until Stop.");
+    } catch (error) {
+      if (generationRunRef.current === run) setGenerationStatus("Music unavailable; recording continues. " + String(error));
+    } finally {
+      clearInterval(progressTimer);
+      if (generationRunRef.current === run) setGenerationProgress(0);
+    }
+  }, [finishSession]);
 
   const generateSong = useCallback(async () => {
-    if (SUNO_DISABLED) {
-      generatingRef.current = false;
-      setGenerationProgress(0);
-      setGenerationStatus(SUNO_PAUSED_MESSAGE);
-      setIsActive(false);
-      return;
-    }
-    // Prevent double generation
-    if (generatingRef.current) return;
+    const session = activeSessionRef.current;
+    const outbox = outboxRef.current;
+    if (!session || session.endedAt !== null || !outbox || generatingRef.current) return;
     generatingRef.current = true;
-    const generationRun = generationRunRef.current;
-
-    const collection = collectionRef.current;
-    const readings = readingsRef.current.filter((reading) =>
-      collection &&
-      reading.timestamp >= collection.startedAt &&
-      reading.timestamp <= collection.endsAt
-    );
-    const p1 = readings.filter((r) => r.personId === 1);
-    const p2 = readings.filter((r) => r.personId === 2);
-
-    // Ring data is only logged; the song comes from the genres alone
-    const snap = p1.length >= 5 && p2.length >= 5 ? computeSnapshot(p1, p2) : null;
-
-    const { prompt, style } = buildPrompt(genre1, genre2);
-    setGenerationStatus("Submitting to Suno...");
-
+    const run = generationRunRef.current;
+    if (SUNO_DISABLED) { setGenerationStatus(SUNO_PAUSED_MESSAGE); return; }
     try {
-      const res = await fetch("/api/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId, prompt, style, snapshot: snap }),
+      // Persist before any paid request. Reload never resubmits an uncertain request.
+      await outbox.updateSession(session.clientSessionId, { generationAttempted: true });
+      await outbox.flush();
+      if (generationRunRef.current !== run) return;
+      const saved = await outbox.getSession(session.clientSessionId);
+      if (!saved?.serverSessionId) throw new Error("Session is still pending upload");
+      const readings = await outbox.snapshot(session.clientSessionId, session.startedAt, session.startedAt + WINDOW_SEC * 1000);
+      const p1 = readings.filter((reading) => reading.personId === 1);
+      const p2 = readings.filter((reading) => reading.personId === 2);
+      const snapshot = p1.length >= 5 && p2.length >= 5 ? computeSnapshot(p1, p2) : null;
+      const { prompt, style } = buildPrompt(session.genre1, session.genre2);
+      if (generationRunRef.current !== run) return;
+      setGenerationStatus("Submitting to Suno... Recording continues.");
+      const response = await fetch("/api/generate", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: saved.serverSessionId, prompt, style, snapshot }),
       });
-      if (res.status === 423) {
-        if (generationRunRef.current === generationRun) {
-          generatingRef.current = false;
-          setGenerationProgress(0);
-          setGenerationStatus(SUNO_PAUSED_MESSAGE);
-          setIsActive(false);
-        }
-        return;
-      }
-      const data = await res.json();
-      if (generationRunRef.current !== generationRun) return;
-
-      if (data.taskId) {
-        const num = songCount + 1;
-        setSongCount(num);
-        void pollForSong(data.taskId, num, prompt, style, generationRun);
-      } else {
-        setGenerationStatus("Suno error: " + JSON.stringify(data));
-      }
-    } catch (err) {
-      if (generationRunRef.current !== generationRun) return;
-      setGenerationStatus("API error: " + String(err));
+      if (generationRunRef.current !== run) return;
+      if (response.status === 423) { setGenerationStatus(SUNO_PAUSED_MESSAGE); return; }
+      if (!response.ok) throw new Error(`Music request failed (${response.status})`);
+      const data = await response.json();
+      if (generationRunRef.current !== run) return;
+      if (!data.taskId) throw new Error("Music service did not return a task ID");
+      void pollForSong(data.taskId, prompt, style, run);
+    } catch (error) {
+      if (generationRunRef.current === run) setGenerationStatus("Music unavailable; recording continues. " + String(error));
     }
-  }, [sessionId, songCount, pollForSong, genre1, genre2]);
+  }, [pollForSong]);
 
   const startSession = useCallback(async () => {
-    if (startingSessionRef.current) return;
+    const outbox = outboxRef.current;
+    if (!outbox || !sync.ready || !initialized || startingSessionRef.current || activeSessionRef.current) return;
     startingSessionRef.current = true;
+    const session: RecordingSession = {
+      clientSessionId: crypto.randomUUID(), serverSessionId: null, startedAt: Date.now(), endedAt: null,
+      endAcknowledged: false, notes: mockMode ? "Mock web session" : "Web session",
+      genre1, genre2, generationAttempted: false, retired: false,
+      person1Count: 0, person2Count: 0, acknowledgedCount: 0,
+    };
+    startingReadingsRef.current = { startedAt: session.startedAt, readings: [] };
     try {
-      const res = await fetch("/api/sessions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ notes: mockMode ? "Mock web session" : "Web session" }),
-      });
-      if (!res.ok) throw new Error(`Session creation failed (${res.status})`);
-      const data = await res.json();
-      if (!Number.isSafeInteger(data.sessionId) || data.sessionId <= 0) {
-        throw new Error("Invalid session ID");
+      await outbox.createSession(session);
+      sessionStorage.setItem(CURRENT_SESSION_KEY, session.clientSessionId);
+      activeSessionRef.current = session;
+      // Preserve callbacks received while IndexedDB was committing the parent.
+      for (const reading of startingReadingsRef.current.readings) {
+        void outbox.append(session.clientSessionId, reading)
+          .catch((error) => setSessionError("Could not retain measurement: " + String(error)));
       }
-      generationRunRef.current += 1;
-      const startedAt = Date.now();
-      collectionRef.current = {
-        sessionId: data.sessionId,
-        startedAt,
-        endsAt: startedAt + WINDOW_SEC * 1000,
-        collecting: true,
-      };
-      readingsRef.current = [];
-      setSessionId(data.sessionId);
-      setIsActive(true);
-      setCollectSeconds(0);
+      startingReadingsRef.current = null;
+      generationRunRef.current++;
       generatingRef.current = false;
+      setClientSessionId(session.clientSessionId);
+      setIsActive(true);
+      setEndPersisted(false);
+      setElapsedSeconds(0);
+      setSessionError("");
+      setGenerationStatus(SUNO_DISABLED ? SUNO_PAUSED_MESSAGE : "Recording biometric data...");
       mockTickRef.current = 0;
-      // BLE stays streaming; only the session's observation window resets.
-      setGenerationStatus("Collecting biometric data...");
-    } catch (err) {
-      console.error("Failed to start session:", err);
-    } finally {
-      startingSessionRef.current = false;
-    }
-  }, [mockMode]);
+      void outbox.flush();
+    } catch (error) {
+      setSessionError("Could not start local recording: " + String(error));
+    } finally { startingSessionRef.current = false; startingReadingsRef.current = null; }
+  }, [sync.ready, initialized, mockMode, genre1, genre2]);
 
   const stopSession = useCallback(async () => {
-    const stoppedRun = ++generationRunRef.current;
-    if (collectionRef.current) collectionRef.current.collecting = false;
-    setIsActive(false);
-    if (collectIntervalRef.current) {
-      clearInterval(collectIntervalRef.current);
-      collectIntervalRef.current = null;
-    }
-    await sendReadingsToApi();
-    if (sessionId) {
-      await fetch("/api/sessions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "end", sessionId }),
-      });
-    }
-    if (generationRunRef.current === stoppedRun) setGenerationStatus("");
-  }, [sessionId, sendReadingsToApi]);
+    setGenerationStatus("");
+    setGenerationProgress(0);
+    await finishSession();
+  }, [finishSession]);
 
-  // Collection tick (1Hz)
+  const newSession = useCallback(async () => {
+    const session = activeSessionRef.current;
+    if (!session || !endPersisted || session.endedAt === null) return;
+    try {
+      await outboxRef.current?.retire(session.clientSessionId);
+      sessionStorage.removeItem(CURRENT_SESSION_KEY);
+      activeSessionRef.current = null;
+      generationRunRef.current++;
+      generatingRef.current = false;
+      setClientSessionId(null);
+      setElapsedSeconds(0);
+      setEndPersisted(false);
+      setCurrentSong(null);
+      setGenerationStatus("");
+      setGenerationProgress(0);
+      setGenre1(null);
+      setGenre2(null);
+      setMockRing1Data(null);
+      setMockRing2Data(null);
+      setPlayerEpoch((epoch) => epoch + 1);
+      setSessionError("");
+    } catch (error) {
+      setSessionError("Could not prepare a new session: " + String(error));
+    }
+  }, [endPersisted]);
+
   useEffect(() => {
-    if (!isActive || !collectionRef.current?.collecting) return;
-
-    collectIntervalRef.current = setInterval(() => {
-      mockTickRef.current += 1;
-      const t = mockTickRef.current;
-
-      // Generate mock data if in mock mode
+    if (!isActive) return;
+    const timer = setInterval(() => {
+      const session = activeSessionRef.current;
+      if (!session || session.endedAt !== null) return;
       if (mockMode) {
-        const r1 = generateMockReading(1, t);
-        const r2 = generateMockReading(2, t);
-        recordReading(r1);
-        recordReading(r2);
-
-        setMockRing1Data({
-          heartRate: r1.heartRate,
-          spo2: r1.spo2,
-          accelX: r1.accelX,
-          accelY: r1.accelY,
-          accelZ: r1.accelZ,
-          rawPpg: r1.rawPpg,
-          batteryLevel: 85,
-          isCharging: false,
-          lastUpdate: r1.timestamp,
-        });
-        setMockRing2Data({
-          heartRate: r2.heartRate,
-          spo2: r2.spo2,
-          accelX: r2.accelX,
-          accelY: r2.accelY,
-          accelZ: r2.accelZ,
-          rawPpg: r2.rawPpg,
-          batteryLevel: 72,
-          isCharging: false,
-          lastUpdate: r2.timestamp,
-        });
-      }
-
-      // Skip if already generating
-      if (generatingRef.current) return;
-
-      const collection = collectionRef.current;
-      if (!collection?.collecting) return;
-      const elapsed = Math.floor((Date.now() - collection.startedAt) / 1000);
-      setCollectSeconds(Math.min(elapsed, WINDOW_SEC));
-
-      // Keep network effects outside React state updaters (which may be replayed).
-      if (Date.now() >= collection.endsAt) {
-        collection.collecting = false;
-        if (collectIntervalRef.current) {
-          clearInterval(collectIntervalRef.current);
-          collectIntervalRef.current = null;
+        const t = ++mockTickRef.current;
+        for (const personId of [1, 2] as const) {
+          const reading = generateMockReading(personId, t);
+          recordReading(reading);
+          const mockData: RingData = {
+            heartRate: reading.heartRate, spo2: reading.spo2, rawPpg: reading.rawPpg,
+            accelX: reading.accelX, accelY: reading.accelY, accelZ: reading.accelZ,
+            batteryLevel: 85, isCharging: false, lastUpdate: reading.timestamp,
+          };
+          if (personId === 1) setMockRing1Data(mockData);
+          else setMockRing2Data(mockData);
         }
-        void sendReadingsToApi();
-        void generateSong();
       }
+      const elapsed = Math.floor((Date.now() - session.startedAt) / 1000);
+      setElapsedSeconds(elapsed);
+      if (elapsed >= WINDOW_SEC) void generateSong();
     }, 1000);
+    return () => clearInterval(timer);
+  }, [isActive, mockMode, generateSong, recordReading]);
 
-    return () => {
-      if (collectIntervalRef.current) {
-        clearInterval(collectIntervalRef.current);
-      }
-    };
-  }, [isActive, mockMode, sendReadingsToApi, generateSong, recordReading]);
-
+  const currentRecording = sync.sessions.find((session) => session.clientSessionId === clientSessionId);
+  const saved = endPersisted && currentRecording?.endAcknowledged && sync.localWrites === 0;
+  const saveStatus = sync.storageError ? "Local storage needs attention"
+    : sync.localWrites > 0 ? "Saving locally..."
+    : sync.pendingReadings > 0 || sync.pendingSessions > 0 ? `${sync.pendingReadings} measurements pending upload`
+    : saved ? "Saved" : isActive ? "All received measurements saved" : "Ready";
   return (
     <div className="relative min-h-screen bg-background text-foreground">
       <FloatingIcons />
@@ -491,21 +408,23 @@ export default function Home() {
             </p>
           </div>
           <div className="flex items-center gap-3">
-            {!isActive ? (
+            {!clientSessionId ? (
               <Button
                 onClick={startSession}
                 variant="3d-primary"
                 size="lg"
                 className="h-12 px-7 text-base"
-                disabled={!anyConnected}
+                disabled={!anyConnected || !sync.ready || !initialized}
                 title={!anyConnected ? "Connect at least one ring" : ""}
               >
                 Start Session
               </Button>
-            ) : (
+            ) : isActive || !endPersisted ? (
               <Button onClick={stopSession} variant="destructive" size="lg" className="h-12 rounded-2xl px-7 text-base font-bold uppercase tracking-widest">
                 Stop
               </Button>
+            ) : (
+              <Button onClick={newSession} variant="3d-primary" size="lg">New Session</Button>
             )}
           </div>
         </div>
@@ -515,6 +434,14 @@ export default function Home() {
             {SUNO_PAUSED_MESSAGE}
           </div>
         )}
+
+        <div role="status" aria-label="Recording storage" className="rounded-xl border border-border/60 bg-card px-4 py-3 text-sm space-y-1">
+          <p className="font-medium">{isActive ? "Recording" : clientSessionId ? "Session finished" : "Session"} · {saveStatus}</p>
+          {clientSessionId && <p>{elapsedSeconds}s · Person 1: {currentRecording?.person1Count ?? 0} · Person 2: {currentRecording?.person2Count ?? 0} measurements</p>}
+          {(sync.networkError || sync.storageError || sessionError) && <p className="text-destructive">{sessionError || sync.storageError || sync.networkError}</p>}
+          {sync.localWrites > 0 && <p>Some measurements are only in memory. Keep this tab open until local saving finishes.</p>}
+          {sync.pendingReadings > 0 && sync.localWrites === 0 && <p>Pending measurements are kept on this device and retried automatically.</p>}
+        </div>
 
         {/* Ring cards */}
         <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
@@ -547,16 +474,17 @@ export default function Home() {
         {/* Session panel */}
         <SessionPanel
           isActive={isActive}
-          collectSeconds={Math.min(collectSeconds, WINDOW_SEC)}
+          collectSeconds={Math.min(elapsedSeconds, WINDOW_SEC)}
           windowSeconds={WINDOW_SEC}
-          status={generationStatus || (isActive ? "Collecting..." : "")}
+          status={generationStatus || (isActive ? "Recording..." : "")}
           heartRatesRef={liveHrRef}
         />
 
         {/* Music player */}
         <MusicPlayer
+          key={playerEpoch}
           currentSong={currentSong}
-          history={history}
+          history={[]}
           generationStatus={generationStatus}
           generationProgress={generationProgress}
           onSongEnd={() => {}}

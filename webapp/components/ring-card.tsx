@@ -50,6 +50,7 @@ export default function RingCard({
   const [diagnostics, setDiagnostics] = useState<RingDiagnostics | null>(null);
   const [now, setNow] = useState(0);
   const [retrying, setRetrying] = useState(false);
+  const [opticalActionPending, setOpticalActionPending] = useState(false);
   const [measurementMode, setMeasurementMode] = useState<HeartRateMode>("standard");
   const [diagnosticMessage, setDiagnosticMessage] = useState("");
   const [diagnosticReport, setDiagnosticReport] = useState("");
@@ -100,7 +101,10 @@ export default function RingCard({
   // Advance the age even when the ring has stopped sending notifications.
   useEffect(() => {
     if (state !== "connected" || mockMode) return;
-    const timer = setInterval(() => setNow(Date.now()), 1000);
+    const timer = setInterval(() => {
+      setNow(Date.now());
+      void ringRef.current?.refreshBattery();
+    }, 1000);
     return () => clearInterval(timer);
   }, [state, mockMode]);
 
@@ -138,6 +142,31 @@ export default function RingCard({
     }
   };
 
+  const runOpticalDiagnostic = async (duration: 15000 | 30000) => {
+    setOpticalActionPending(true);
+    setDiagnosticMessage("");
+    setDiagnosticReport("");
+    try {
+      await ringRef.current?.startOpticalDiagnostic(duration);
+    } catch (error) {
+      setDiagnosticMessage(error instanceof Error ? error.message : "Could not start optical diagnostic.");
+    } finally {
+      setOpticalActionPending(false);
+    }
+  };
+
+  const stopOpticalDiagnostic = async () => {
+    setOpticalActionPending(true);
+    setDiagnosticMessage("");
+    try {
+      await ringRef.current?.stopOpticalDiagnostic();
+    } catch (error) {
+      setDiagnosticMessage(error instanceof Error ? error.message : "Could not stop optical diagnostic.");
+    } finally {
+      setOpticalActionPending(false);
+    }
+  };
+
   const changeMeasurementMode = async (value: string) => {
     if (value !== "standard" && value !== "legacy" && value !== "realtime") return;
     setRetrying(true);
@@ -165,7 +194,21 @@ export default function RingCard({
     secondsSinceReading !== null && secondsSinceReading * 1000 < HR_STALE_MS
   );
   const waitingForContact = !mockMode && diagnostics?.measurementState === "waiting-for-contact";
-  const heartRate = isConnected && !waitingForContact ? displayData.heartRate : null;
+  const opticalActive = !mockMode && (
+    diagnostics?.opticalState === "preparing" || diagnostics?.opticalState === "capturing" ||
+    diagnostics?.opticalState === "stopping"
+  );
+  const measurementPaused = !mockMode && diagnostics?.measurementState === "paused";
+  const heartRate = isConnected && !waitingForContact && !opticalActive && !measurementPaused
+    ? displayData.heartRate
+    : null;
+  const opticalSecondsRemaining = Math.max(0, Math.ceil(((diagnostics?.opticalEndsAt ?? 0) - now) / 1000));
+  const opticalDisabled = diagnostics?.hardware === "RT02R_V3.1";
+  const batteryAge = diagnostics?.lastBatteryAt
+    ? Math.max(0, Math.floor((now - diagnostics.lastBatteryAt) / 1000))
+    : null;
+  const batteryAgeLabel = batteryAge === null ? "not read" : batteryAge < 60
+    ? `${batteryAge}s ago` : `${Math.floor(batteryAge / 60)}m ago`;
 
   return (
     <Card
@@ -229,6 +272,7 @@ export default function RingCard({
               className={`ml-auto text-xs ${displayData.batteryLevel < 20 ? "text-destructive" : "text-muted-foreground"}`}
             >
               🔋 {displayData.batteryLevel}%{displayData.isCharging ? " ⚡" : ""}
+              {!mockMode && <span className="block text-right text-[10px]">Read {batteryAgeLabel}</span>}
             </span>
           )}
         </div>
@@ -236,15 +280,21 @@ export default function RingCard({
         {!mockMode && isConnected && (
           <div className="-mt-2 space-y-1 text-xs text-muted-foreground">
             <p>
-              {waitingForContact
-                ? "Put the ring back on · measurements resume automatically"
-                : diagnostics?.measurementState === "error"
-                  ? "Measurement needs attention · see diagnostics below"
-                  : diagnostics?.measurementState === "warming-up" || secondsSinceReading === null
-                    ? "Warming up · keep the ring still against your skin"
-                    : fresh
-                      ? `Receiving · last measurement ${secondsSinceReading}s ago`
-                      : `Last reading · no new measurement for ${secondsSinceReading}s`}
+              {opticalActive
+                ? diagnostics?.opticalState === "stopping"
+                  ? "Optical test · checking that the sensor stopped"
+                  : "Optical test · heart-rate recording paused"
+                : measurementPaused
+                  ? "Measurement paused · choose Retry measurement to resume"
+                  : waitingForContact
+                    ? "Put the ring back on · measurements resume automatically"
+                    : diagnostics?.measurementState === "error"
+                      ? "Measurement needs attention · see diagnostics below"
+                      : diagnostics?.measurementState === "warming-up" || secondsSinceReading === null
+                        ? "Warming up · keep the ring still against your skin"
+                        : fresh
+                          ? `Receiving · last measurement ${secondsSinceReading}s ago`
+                          : `Last reading · no new measurement for ${secondsSinceReading}s`}
             </p>
             <p className="tabular-nums" data-testid={`ring-${personId}-sample-count`}>
               {diagnostics?.heartRateSamples ?? 0} real measurements received
@@ -292,6 +342,7 @@ export default function RingCard({
               <dt>Bluetooth packets</dt><dd>{diagnostics.packetsReceived}</dd>
               <dt>Start / continue</dt><dd>{diagnostics.startsSent} / {diagnostics.continuesSent}</dd>
               <dt>Recovery attempts</dt><dd>{diagnostics.restartCount}</dd>
+              <dt>Battery last read</dt><dd>{batteryAgeLabel}</dd>
             </dl>
             <label className="mt-3 block space-y-1" htmlFor={`ring-${personId}-hr-mode`}>
               <span>Measurement protocol</span>
@@ -299,7 +350,7 @@ export default function RingCard({
                 id={`ring-${personId}-hr-mode`}
                 className="w-full rounded border border-border bg-background px-2 py-1.5 text-foreground"
                 value={measurementMode}
-                disabled={retrying || !isConnected}
+                disabled={retrying || opticalActionPending || opticalActive || !isConnected}
                 onChange={(event) => void changeMeasurementMode(event.target.value)}
               >
                 <option value="standard">Standard</option>
@@ -312,13 +363,43 @@ export default function RingCard({
               <Button variant="ghost" size="sm" onClick={() => setDiagnosticReport(ringRef.current?.getDebugReport() ?? "")}>
                 Show report
               </Button>
+              {isConnected && <Button variant="ghost" size="sm" disabled={opticalActive || opticalActionPending} onClick={() => void ringRef.current?.refreshBattery(true)}>
+                Refresh battery
+              </Button>}
               {isConnected && (
-                <Button variant="ghost" size="sm" onClick={handleRetry} disabled={retrying}>
+                <Button variant="ghost" size="sm" onClick={handleRetry} disabled={retrying || opticalActionPending || opticalActive}>
                   {retrying ? "Restarting..." : "Retry measurement"}
                 </Button>
               )}
             </div>
+            {isConnected && (
+              <div className="mt-3 space-y-2 rounded border border-border/60 p-3">
+                <p className="font-medium">Optical diagnostic</p>
+                <p>Short sensor capture. Packet collection ends automatically; check that the ring lights switch off. Resume heart rate with Retry measurement.</p>
+                {opticalDisabled && <p>Disabled for this ring: sensor lights remained on after STOP and disconnect.</p>}
+                <div className="flex flex-wrap gap-2">
+                  <Button variant="outline" size="sm" disabled={opticalDisabled || retrying || opticalActionPending || opticalActive} onClick={() => void runOpticalDiagnostic(15000)}>
+                    Optical test 15s
+                  </Button>
+                  <Button variant="ghost" size="sm" disabled={opticalDisabled || retrying || opticalActionPending || opticalActive} onClick={() => void runOpticalDiagnostic(30000)}>
+                    Optical test 30s
+                  </Button>
+                  {opticalActive && (
+                    <Button variant="ghost" size="sm" disabled={opticalActionPending || diagnostics.opticalState === "stopping"} onClick={() => void stopOpticalDiagnostic()}>
+                      Stop optical test
+                    </Button>
+                  )}
+                </div>
+                {diagnostics.opticalState !== "idle" && (
+                  <p role="status" className="tabular-nums">
+                    {diagnostics.opticalState} · {diagnostics.opticalFramesReceived} raw packets
+                    {opticalActive && opticalSecondsRemaining > 0 ? ` · ${opticalSecondsRemaining}s remaining` : ""}
+                  </p>
+                )}
+              </div>
+            )}
             {diagnosticMessage && <p role="status" className="mt-2">{diagnosticMessage}</p>}
+            {diagnostics.batteryError && <p role="status" className="mt-2">{diagnostics.batteryError}</p>}
             {diagnosticReport && (
               <textarea
                 aria-label="Measurement diagnostic report"

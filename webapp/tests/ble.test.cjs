@@ -803,3 +803,388 @@ test("hung contact recovery STOP closes the connection without sending START", a
   assert.equal(h.ring.state, "disconnected");
   assert.equal(h.ring.diagnostics.startsSent, 1);
 });
+
+async function startOptical(h, duration = 15_000) {
+  const starting = h.ring.startOpticalDiagnostic(duration);
+  await settle();
+  await h.advance(2_000);
+  await starting;
+}
+
+test("battery refresh is throttled, preserves HR freshness, and can be requested manually", async () => {
+  const h = verifiedRing();
+  await h.ring.scan();
+  h.notify(packet(0x03, 58));
+  h.notify(packet(0x69, 6, 0, 82));
+  const hrAt = h.ring.diagnostics.lastHeartRateAt;
+  const batteryAt = h.ring.diagnostics.lastBatteryAt;
+  await h.advance(59_000);
+  await h.ring.refreshBattery();
+  assert.equal(h.writes.filter(w => w.bytes[0] === 3).length, 1);
+  await h.advance(1_000);
+  await h.ring.refreshBattery();
+  assert.equal(h.writes.filter(w => w.bytes[0] === 3).length, 2);
+  h.notify(packet(0x03, 57));
+  assert.equal(h.ring.data.batteryLevel, 57);
+  assert.equal(h.ring.diagnostics.lastBatteryAt - batteryAt, 60_000);
+  assert.equal(h.ring.diagnostics.lastHeartRateAt, hrAt);
+  assert.equal(h.freshReadings.length, 1);
+  await h.ring.refreshBattery(true);
+  assert.equal(h.writes.filter(w => w.bytes[0] === 3).length, 3);
+  assert.equal(h.ring.diagnostics.startsSent, 1);
+});
+
+test("bad battery responses and write failures do not invalidate a healthy HR stream", async () => {
+  const h = verifiedRing();
+  await h.ring.scan();
+  h.notify(packet(0x03, 58));
+  h.notify(packet(0x69, 6, 0, 81));
+  const batteryAt = h.ring.diagnostics.lastBatteryAt;
+  h.notify(packet(0x03, 101));
+  assert.equal(h.ring.diagnostics.lastBatteryAt, batteryAt);
+  assert.equal(h.ring.data.batteryLevel, 58);
+  assert.equal(h.ring.diagnostics.measurementState, "measuring");
+  assert.match(h.ring.diagnostics.batteryError, /Invalid battery/);
+  h.failWrites(new Error("Battery query rejected"));
+  await h.ring.refreshBattery(true);
+  assert.equal(h.ring.diagnostics.measurementState, "measuring");
+  assert.match(h.ring.diagnostics.batteryError, /Battery query rejected/);
+  h.notify(packet(0x03, 57));
+  assert.equal(h.ring.diagnostics.batteryError, null);
+});
+
+test("optical capture suppresses battery queries and allows them again while paused", async () => {
+  const h = verifiedRing();
+  await h.ring.scan();
+  await startOptical(h);
+  await h.ring.refreshBattery(true);
+  assert.equal(h.writes.filter(w => w.bytes[0] === 3).length, 1);
+  await h.advance(20_000);
+  await h.ring.refreshBattery(true);
+  assert.equal(h.writes.filter(w => w.bytes[0] === 3).length, 2);
+  assert.equal(h.ring.diagnostics.measurementState, "paused");
+  assert.equal(h.maximumWrites, 1);
+});
+
+test("hung battery requests are bounded and cannot emit a late HR START on initial connection", async () => {
+  const h = verifiedRing();
+  const release = h.blockWrites();
+  const connecting = h.ring.scan();
+  await settle();
+  await settle();
+  assert.equal(h.writes.at(-1)?.bytes[0], 0x03);
+  await h.advance(3_000);
+  assert.equal(await connecting, false);
+  assert.equal(h.ring.state, "disconnected");
+  assert.match(h.ring.diagnostics.lastError, /Battery request stalled/);
+  release();
+  await settle();
+  assert.equal(h.ring.diagnostics.startsSent, 0);
+  assert.equal(h.timers.size, 0);
+});
+
+function opticalWrites(h) {
+  return h.writes.filter((write) => write.bytes[0] === 0xa1);
+}
+
+test("optical diagnostic validates duration, connection and exact device profile before any write", async () => {
+  const h = verifiedRing();
+  await assert.rejects(h.ring.startOpticalDiagnostic(), /Connect the ring/);
+  await h.ring.scan();
+  const count = h.writes.length;
+  for (const duration of [0, 14_999, 20_000, 30_001, NaN]) {
+    await assert.rejects(h.ring.startOpticalDiagnostic(duration), /only 15 or 30/);
+  }
+  assert.equal(h.writes.length, count);
+  const unknown = harness({ deviceInfo: true, firmware: "R02_3.00.18_240903", hardware: "R02_V3.0" });
+  await unknown.ring.scan();
+  await assert.rejects(unknown.ring.startOpticalDiagnostic(), /verified hardware/);
+  assert.equal(opticalWrites(unknown).length, 0);
+});
+
+test("newer profile cannot restart optical diagnostics after observed persistent sensor LEDs", async () => {
+  const h = harness({ deviceInfo: true, firmware: "RT02R_3.11.00_250611", hardware: "RT02R_V3.1" });
+  await h.ring.scan();
+  const count = h.writes.length;
+  await assert.rejects(h.ring.startOpticalDiagnostic(), /sensor LEDs active/);
+  assert.equal(h.writes.length, count);
+  assert.equal(h.ring.heartRateMode, "realtime");
+  h.notify(packet(0x69, 6, 0, 83));
+  assert.equal(h.freshReadings.length, 1);
+});
+
+test("optical preparation stops selected HR, waits two quiet seconds and sends only documented full frames", async () => {
+  const h = verifiedRing();
+  await h.ring.scan();
+  h.notify(packet(0x69, 6, 0, 83));
+  const starting = h.ring.startOpticalDiagnostic();
+  await settle();
+  assert.deepEqual(h.writes.at(-1).bytes.slice(0, 3), [0x6a, 6, 0]);
+  assert.equal(h.ring.data.heartRate, null);
+  assert.equal(h.ring.diagnostics.measurementState, "optical-test");
+  assert.equal(h.ring.diagnostics.opticalState, "preparing");
+  await h.advance(100);
+  h.notify(packet(0x69, 6, 0, 84)); // Brief in-flight HR remains trace-only.
+  await h.advance(1_899);
+  assert.equal(opticalWrites(h).length, 0);
+  await h.advance(1);
+  await starting;
+  assert.deepEqual(h.writes.at(-1).bytes, [0xa1, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xa9]);
+  assert.equal(h.ring.diagnostics.opticalState, "capturing");
+  assert.equal(h.ring.diagnostics.opticalEndsAt - h.writes.at(-1).at, 15_000);
+  assert.equal(h.freshReadings.length, 1);
+  assert.equal(h.maximumWrites, 1);
+});
+
+test("positive HR late in preparation aborts raw START and remains visible in the trace", async () => {
+  const h = verifiedRing();
+  await h.ring.scan();
+  const starting = h.ring.startOpticalDiagnostic();
+  await settle();
+  await h.advance(1_500);
+  h.notify(packet(0x69, 6, 0, 84));
+  await h.advance(500);
+  await starting;
+  assert.equal(opticalWrites(h).length, 0);
+  assert.equal(h.ring.state, "disconnected");
+  assert.equal(h.ring.diagnostics.opticalState, "error");
+  assert.match(h.ring.diagnostics.lastError, /continued after normal STOP/);
+  assert.equal(h.freshReadings.length, 0);
+  assert.equal(h.timers.size, 0);
+  assert.ok(JSON.parse(h.ring.getDebugReport()).events.some((event) => event.detail.startsWith("69 06 00 54")));
+});
+
+test("optical packets preserve complete raw evidence and never enter physiological callbacks", async () => {
+  const h = verifiedRing();
+  await h.ring.scan();
+  await startOptical(h);
+  const dataCount = h.allData.length;
+  const zero = packet(0xa1, 2);
+  const corrupt = packet(0xa1, 2, 0x10, 0x20);
+  corrupt.setUint8(15, 0);
+  const offsetBytes = new Uint8Array(20);
+  offsetBytes.set(new Uint8Array(packet(0xa1, 3, 2, 1).buffer), 2);
+  h.notify(zero);
+  h.notify(corrupt);
+  h.notify(new DataView(offsetBytes.buffer, 2, 16));
+  h.notify(new DataView(Uint8Array.from([0xa1, 2, 12, 3]).buffer));
+  h.notify(packet(0x69, 6, 0, 87));
+  h.notify(packet(0x69, 6, 1, 87));
+  const report = JSON.parse(h.ring.getDebugReport());
+  assert.equal(report.opticalDiagnostic.frames.length, 4);
+  assert.deepEqual(report.opticalDiagnostic.frames.map((frame) => frame.checksumValid), [true, false, true, false]);
+  assert.deepEqual(report.opticalDiagnostic.frames.map((frame) => frame.length), [16, 16, 16, 4]);
+  assert.equal(report.opticalDiagnostic.frames[0].hex, "a1 02 00 00 00 00 00 00 00 00 00 00 00 00 00 a3");
+  assert.equal(report.opticalDiagnostic.frames[2].hex.startsWith("a1 03 02 01"), true);
+  assert.match(report.opticalDiagnostic.frames[0].at, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(report.diagnostics.opticalFramesReceived, 4);
+  assert.equal(h.allData.length, dataCount);
+  assert.equal(h.freshReadings.length, 0);
+  assert.equal(h.ring.data.rawPpg, null);
+  assert.equal(h.ring.data.accelX, null);
+  assert.equal(h.ring.data.heartRate, null);
+  assert.equal(h.ring.diagnostics.measurementState, "optical-test");
+  assert.equal(h.ring.diagnostics.lastError, null);
+});
+
+test("optical duration is bounded, STOP gets five-second observation, and HR stays paused until Retry", async () => {
+  const h = verifiedRing();
+  await h.ring.scan();
+  await startOptical(h);
+  await h.advance(14_999);
+  assert.equal(opticalWrites(h).length, 1);
+  await h.advance(1);
+  assert.deepEqual(h.writes.at(-1).bytes, [0xa1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xa3]);
+  assert.equal(h.ring.diagnostics.opticalState, "stopping");
+  await h.advance(2_000);
+  h.notify(packet(0xa1, 2)); // Allowed delayed packet at the grace boundary.
+  await h.advance(2_999);
+  assert.equal(h.ring.diagnostics.opticalState, "stopping");
+  await h.advance(1);
+  assert.equal(h.ring.diagnostics.opticalState, "completed");
+  assert.equal(h.ring.diagnostics.measurementState, "paused");
+  const report = JSON.parse(h.ring.getDebugReport());
+  assert.equal(report.opticalDiagnostic.stopSentAt - report.opticalDiagnostic.startedAt, 15_000);
+  assert.equal(report.opticalDiagnostic.completedAt - report.opticalDiagnostic.stopSentAt, 5_000);
+  const count = h.writes.length;
+  await h.ring.beginMeasurement();
+  await h.advance(120_000);
+  assert.equal(h.writes.length, count);
+  assert.equal(h.timers.size, 0);
+  h.notify(packet(0x69, 6, 0, 87));
+  assert.equal(h.freshReadings.length, 0);
+  await h.ring.retryMeasurement();
+  h.notify(packet(0x69, 6, 0, 88));
+  assert.equal(h.ring.diagnostics.startsSent, 2);
+  assert.equal(h.freshReadings.length, 1);
+});
+
+test("raw frames beyond STOP grace close GATT and retain report and readable error", async () => {
+  for (const lateAt of [2_001, 6_000]) {
+    const h = verifiedRing();
+    await h.ring.scan();
+    await startOptical(h);
+    const stopping = h.ring.stopOpticalDiagnostic();
+    await settle();
+    await h.advance(lateAt);
+    h.notify(packet(0xa1, 2));
+    await stopping;
+    assert.equal(h.ring.state, "disconnected");
+    assert.equal(h.server.connected, false);
+    assert.equal(h.ring.diagnostics.opticalState, "error");
+    assert.match(h.ring.diagnostics.lastError, /continued after optical STOP/);
+    assert.equal(h.timers.size, 0);
+    assert.equal(JSON.parse(h.ring.getDebugReport()).opticalDiagnostic.frames.length, 1);
+    assert.equal(h.freshReadings.length, 0);
+  }
+});
+
+test("hung normal STOP aborts optical preparation at three seconds with no late raw START", async () => {
+  const h = verifiedRing();
+  await h.ring.scan();
+  const release = h.blockWrites();
+  const starting = h.ring.startOpticalDiagnostic();
+  await settle();
+  await h.advance(2_999);
+  assert.equal(h.ring.state, "connected");
+  await h.advance(1);
+  await starting;
+  assert.equal(h.ring.state, "disconnected");
+  assert.match(h.ring.diagnostics.lastError, /Normal measurement STOP did not complete/);
+  release();
+  await h.advance(60_000);
+  assert.equal(opticalWrites(h).length, 0);
+  assert.equal(h.timers.size, 0);
+});
+
+test("failed or hung raw STOP closes GATT within its bound and a late completion cannot resume", async () => {
+  for (const failure of ["reject", "hang"]) {
+    const h = verifiedRing();
+    await h.ring.scan();
+    await startOptical(h);
+    let release = () => {};
+    if (failure === "reject") h.failWrites(new Error("STOP rejected"));
+    else release = h.blockWrites();
+    const stopping = h.ring.stopOpticalDiagnostic();
+    await settle();
+    await h.advance(3_000);
+    await stopping;
+    assert.equal(h.ring.state, "disconnected");
+    assert.equal(h.ring.diagnostics.opticalState, "error");
+    assert.match(h.ring.diagnostics.lastError, /Optical STOP did not complete/);
+    release();
+    await h.advance(120_000);
+    assert.equal(h.ring.diagnostics.startsSent, 1);
+    assert.equal(opticalWrites(h).length, 2);
+    assert.equal(h.timers.size, 0);
+  }
+});
+
+test("stop and disconnect cancel the preparing quiet delay without any raw START", async () => {
+  for (const action of ["stop", "disconnect"]) {
+    const h = verifiedRing();
+    await h.ring.scan();
+    const starting = h.ring.startOpticalDiagnostic();
+    await settle();
+    await h.advance(1_000);
+    const stopping = action === "stop" ? h.ring.stopOpticalDiagnostic() : h.ring.disconnect();
+    await settle();
+    await h.advance(5_000);
+    await Promise.all([starting, stopping]);
+    assert.deepEqual(opticalWrites(h).map((write) => write.bytes.slice(0, 3)), [[0xa1, 2, 0]]);
+    assert.equal(h.ring.state, action === "stop" ? "connected" : "disconnected");
+    assert.equal(h.ring.diagnostics.startsSent, 1);
+    await h.advance(120_000);
+    assert.equal(h.timers.size, 0);
+  }
+});
+
+test("cancelling a pending optical START drains its native write before STOP without overlap", async () => {
+  const h = verifiedRing();
+  await h.ring.scan();
+  const starting = h.ring.startOpticalDiagnostic();
+  await settle();
+  const release = h.blockWrites();
+  await h.advance(2_000);
+  assert.deepEqual(opticalWrites(h).map((write) => write.bytes.slice(0, 3)), [[0xa1, 4, 4]]);
+  const closing = h.ring.disconnect();
+  await settle();
+  assert.equal(opticalWrites(h).length, 1);
+  release();
+  await settle();
+  assert.deepEqual(opticalWrites(h).map((write) => write.bytes.slice(0, 3)), [[0xa1, 4, 4], [0xa1, 2, 0]]);
+  await h.advance(5_000);
+  await Promise.all([starting, closing]);
+  assert.equal(h.maximumWrites, 1);
+  assert.equal(h.ring.state, "disconnected");
+  assert.equal(h.timers.size, 0);
+});
+
+test("Retry and mode changes await raw STOP confirmation before normal measurement START", async () => {
+  for (const action of ["retry", "mode"]) {
+    const h = verifiedRing();
+    await h.ring.scan();
+    await startOptical(h);
+    const resuming = action === "retry" ? h.ring.retryMeasurement() : h.ring.setHeartRateMode("standard");
+    await settle();
+    await h.advance(4_999);
+    assert.equal(h.ring.diagnostics.startsSent, 1);
+    await h.advance(1);
+    if (action === "mode") {
+      assert.equal(h.ring.diagnostics.startsSent, 1);
+      await h.advance(2_000);
+    }
+    await resuming;
+    assert.equal(h.ring.diagnostics.startsSent, 2);
+    assert.deepEqual(h.writes.at(-1).bytes.slice(0, 3), [0x69, action === "retry" ? 6 : 1, 1]);
+    assert.equal(h.maximumWrites, 1);
+  }
+});
+
+test("disconnect supersedes a Retry waiting for optical cleanup and forbids a late HR START", async () => {
+  const h = verifiedRing();
+  await h.ring.scan();
+  await startOptical(h);
+  const retrying = h.ring.retryMeasurement();
+  await settle();
+  const closing = h.ring.disconnect();
+  await settle();
+  await h.advance(5_000);
+  await Promise.all([retrying, closing]);
+  assert.equal(h.ring.state, "disconnected");
+  assert.equal(h.ring.diagnostics.startsSent, 1);
+  assert.equal(h.timers.size, 0);
+});
+
+test("thirty-second optical capture caps retained frames at 512 while counting all zero frames", async () => {
+  const h = verifiedRing();
+  await h.ring.scan();
+  await startOptical(h, 30_000);
+  for (let index = 0; index < 520; index++) h.notify(packet(0xa1, index === 0 ? 3 : 2));
+  const report = JSON.parse(h.ring.getDebugReport());
+  assert.equal(report.opticalDiagnostic.frames.length, 512);
+  assert.equal(report.opticalDiagnostic.frames[0].kind, 2);
+  assert.equal(report.diagnostics.opticalFramesReceived, 520);
+  assert.equal(report.opticalDiagnostic.durationMs, 30_000);
+  await h.advance(29_999);
+  assert.equal(h.ring.diagnostics.opticalState, "capturing");
+  await h.advance(5_001);
+  assert.equal(h.ring.diagnostics.opticalState, "completed");
+  assert.equal(h.ring.diagnostics.startsSent, 1);
+  assert.equal(h.ring.diagnostics.continuesSent, 0);
+});
+
+test("unexpected disconnect cancels optical capture timers and retains its incomplete report", async () => {
+  const h = verifiedRing();
+  await h.ring.scan();
+  await startOptical(h);
+  h.notify(packet(0xa1, 2));
+  h.server.disconnect();
+  const count = h.writes.length;
+  await h.advance(120_000);
+  assert.equal(h.writes.length, count);
+  assert.equal(h.ring.diagnostics.opticalState, "error");
+  assert.match(h.ring.diagnostics.lastError, /Bluetooth connection lost/);
+  assert.equal(h.timers.size, 0);
+  assert.equal(JSON.parse(h.ring.getDebugReport()).opticalDiagnostic.frames.length, 1);
+});

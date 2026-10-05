@@ -34,7 +34,7 @@ export default function SessionPanel({
 
       <div className="space-y-1.5">
         <div className="flex justify-between text-sm text-muted-foreground">
-          <span>Collecting biometric data</span>
+          <span>Initial music snapshot · recording continues until song ready or Stop</span>
           <span>
             {collectSeconds}s / {windowSeconds}s
           </span>

@@ -65,6 +65,19 @@ export function buildRawSensorCommand(type: RawSensorType, start: boolean): Arra
   return packet(CMD_RAW_SENSOR, start ? 0x04 : 0x02);
 }
 
+/** Isolated UART diagnostic only; never an OTA or firmware command. */
+export function buildOpticalDiagnosticCommand(start: boolean): ArrayBuffer {
+  // ATC_RF03_Writer / colmi-ring-tools: A1 04 04 starts, A1 02 stops.
+  return start ? packet(CMD_RAW_SENSOR, 0x04, 0x04) : packet(CMD_RAW_SENSOR, 0x02);
+}
+
+export function hasValidFixedPacketChecksum(data: DataView): boolean {
+  if (data.byteLength !== PACKET_LENGTH) return false;
+  let sum = 0;
+  for (let index = 0; index < PACKET_LENGTH - 1; index++) sum += data.getUint8(index);
+  return (sum & 0xff) === data.getUint8(PACKET_LENGTH - 1);
+}
+
 export interface ParsedReading {
   command: number;
   type: number;

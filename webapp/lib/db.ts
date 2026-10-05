@@ -4,21 +4,33 @@ export function getDb() {
   return neon(process.env.DATABASE_URL!);
 }
 
-export async function createSession(notes: string = ""): Promise<number> {
+export async function createSession(clientSessionId: string, startedAt: number, notes = ""): Promise<number> {
   const sql = getDb();
   const rows = await sql`
-    INSERT INTO sessions (notes) VALUES (${notes}) RETURNING id
+    INSERT INTO sessions (client_session_id, started_at, notes)
+    VALUES (${clientSessionId}, ${new Date(startedAt).toISOString()}, ${notes})
+    ON CONFLICT (client_session_id) DO UPDATE
+      SET client_session_id = EXCLUDED.client_session_id
+    RETURNING id
   `;
   return rows[0].id;
 }
 
-export async function endSession(sessionId: number): Promise<void> {
+export async function endSession(sessionId: number, clientSessionId: string, endedAt: number): Promise<boolean> {
   const sql = getDb();
-  await sql`UPDATE sessions SET ended_at = NOW() WHERE id = ${sessionId}`;
+  const timestamp = new Date(endedAt).toISOString();
+  const rows = await sql`
+    UPDATE sessions SET ended_at = COALESCE(ended_at, ${timestamp})
+    WHERE id = ${sessionId} AND client_session_id = ${clientSessionId}
+      AND started_at <= ${timestamp}
+    RETURNING id
+  `;
+  return rows.length === 1;
 }
 
 export interface ReadingInput {
-  personId: number;
+  sampleId: string;
+  personId: 1 | 2;
   timestamp: number;
   heartRate: number | null;
   spo2: number | null;
@@ -33,17 +45,34 @@ export interface ReadingInput {
 export async function insertReadings(
   sessionId: number,
   readings: ReadingInput[]
-): Promise<number> {
+): Promise<{ count: number; acknowledgedSampleIds: string[] }> {
   const sql = getDb();
-  if (readings.length === 0) return 0;
+  if (readings.length === 0) return { count: 0, acknowledgedSampleIds: [] };
   // A failed batch must not leave a partially inserted prefix before a retry.
-  await sql.transaction(readings.map((r) => sql`
+  const results = await sql.transaction(readings.map((r) => sql`
       INSERT INTO biometric_readings
-        (session_id, person_id, timestamp, heart_rate, spo2, temperature, hrv, raw_ppg, accel_x, accel_y, accel_z)
+        (client_sample_id, session_id, person_id, timestamp, heart_rate, spo2, temperature, hrv, raw_ppg, accel_x, accel_y, accel_z)
       VALUES
-        (${sessionId}, ${r.personId}, ${new Date(r.timestamp).toISOString()}, ${r.heartRate}, ${r.spo2}, ${r.temperature}, ${r.hrv}, ${r.rawPpg}, ${r.accelX}, ${r.accelY}, ${r.accelZ})
+        (${r.sampleId}, ${sessionId}, ${r.personId}, ${new Date(r.timestamp).toISOString()}, ${r.heartRate}, ${r.spo2}, ${r.temperature}, ${r.hrv}, ${r.rawPpg}, ${r.accelX}, ${r.accelY}, ${r.accelZ})
+      ON CONFLICT (client_sample_id) DO UPDATE
+        SET client_sample_id = biometric_readings.client_sample_id
+      WHERE biometric_readings.session_id = EXCLUDED.session_id
+        AND biometric_readings.person_id = EXCLUDED.person_id
+        AND biometric_readings.timestamp = EXCLUDED.timestamp
+        AND biometric_readings.heart_rate IS NOT DISTINCT FROM EXCLUDED.heart_rate
+        AND biometric_readings.spo2 IS NOT DISTINCT FROM EXCLUDED.spo2
+        AND biometric_readings.temperature IS NOT DISTINCT FROM EXCLUDED.temperature
+        AND biometric_readings.hrv IS NOT DISTINCT FROM EXCLUDED.hrv
+        AND biometric_readings.raw_ppg IS NOT DISTINCT FROM EXCLUDED.raw_ppg
+        AND biometric_readings.accel_x IS NOT DISTINCT FROM EXCLUDED.accel_x
+        AND biometric_readings.accel_y IS NOT DISTINCT FROM EXCLUDED.accel_y
+        AND biometric_readings.accel_z IS NOT DISTINCT FROM EXCLUDED.accel_z
+      RETURNING client_sample_id
     `));
-  return readings.length;
+  // An identical retry returns its ID; a conflicting observation returns no ID
+  // and stays pending on the client. Never overwrite previously recorded data.
+  const acknowledgedSampleIds = [...new Set(results.flatMap((rows) => rows.map((row) => String(row.client_sample_id))))];
+  return { count: acknowledgedSampleIds.length, acknowledgedSampleIds };
 }
 
 export interface SongInput {

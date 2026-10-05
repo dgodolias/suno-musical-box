@@ -2,13 +2,18 @@
 
 CREATE TABLE IF NOT EXISTS sessions (
     id SERIAL PRIMARY KEY,
+    client_session_id UUID,
     started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     ended_at TIMESTAMPTZ,
     notes TEXT
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_client_session_id
+    ON sessions(client_session_id);
+
 CREATE TABLE IF NOT EXISTS biometric_readings (
     id SERIAL PRIMARY KEY,
+    client_sample_id UUID,
     session_id INTEGER NOT NULL REFERENCES sessions(id),
     person_id SMALLINT NOT NULL CHECK (person_id IN (1, 2)),
     timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -21,6 +26,9 @@ CREATE TABLE IF NOT EXISTS biometric_readings (
     accel_y REAL,
     accel_z REAL
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_readings_client_sample_id
+    ON biometric_readings(client_sample_id);
 
 CREATE INDEX IF NOT EXISTS idx_readings_session_ts
     ON biometric_readings(session_id, timestamp DESC);

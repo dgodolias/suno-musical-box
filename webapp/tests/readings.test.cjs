@@ -20,10 +20,45 @@ function loadModule(file, dependencies = {}, globals = {}) {
   return context.exports;
 }
 
+class MemoryStorage {
+  constructor() { this.sessions = new Map(); this.samples = new Map(); this.failWrites = false; }
+  async open() {}
+  async listSessions() { return [...this.sessions.values()].map((row) => ({ ...row })); }
+  async getSession(id) { const row = this.sessions.get(id); return row && { ...row }; }
+  async createSession(row) { if (this.failWrites) throw new Error("Storage full"); this.sessions.set(row.clientSessionId, { ...row }); }
+  async updateSession(id, patch) {
+    if (this.failWrites) throw new Error("Storage full");
+    this.sessions.set(id, { ...this.sessions.get(id), ...patch });
+  }
+  async addReading(row) {
+    if (this.failWrites) throw new Error("Storage full");
+    if (this.samples.has(row.sampleId)) return;
+    const session = this.sessions.get(row.clientSessionId);
+    assert.ok(session);
+    this.samples.set(row.sampleId, { ...row });
+    session[row.personId === 1 ? "person1Count" : "person2Count"]++;
+  }
+  async readings(id, pendingOnly, limit) {
+    return [...this.samples.values()].filter((row) => row.clientSessionId === id && (!pendingOnly || !row.uploaded)).slice(0, limit).map((row) => ({ ...row }));
+  }
+  async acknowledge(id, ids) {
+    for (const sampleId of new Set(ids)) {
+      const row = this.samples.get(sampleId);
+      if (row?.clientSessionId === id && !row.uploaded) { row.uploaded = 1; this.sessions.get(id).acknowledgedCount++; }
+    }
+  }
+  async prune(id) {
+    const session = this.sessions.get(id);
+    if (!session?.retired || !session.endAcknowledged || session.acknowledgedCount !== session.person1Count + session.person2Count) return;
+    this.sessions.delete(id);
+    for (const [sampleId, row] of this.samples) if (row.clientSessionId === id) this.samples.delete(sampleId);
+  }
+}
+
 // Exercise the real page callbacks with a deterministic clock and no browser,
 // network, database, or music-generation service.
-function pageHarness({ sunoDisabled = false } = {}) {
-  let now = 1_800_000_000_000;
+function pageHarness({ sunoDisabled = false, storage = new MemoryStorage(), tabStorage = new Map(), initialNow = 1_800_000_000_000 } = {}) {
+  let now = initialNow;
   let nextTimer = 1;
   let hookIndex = 0;
   let dirty = false;
@@ -32,6 +67,7 @@ function pageHarness({ sunoDisabled = false } = {}) {
   const hooks = [];
   const effects = [];
   const timers = new Map();
+  const windowListeners = new Map();
   const requests = [];
   const uploadResponses = [];
   const generationResponses = [];
@@ -66,9 +102,10 @@ function pageHarness({ sunoDisabled = false } = {}) {
     useSyncExternalStore() { hookIndex++; return false; },
   };
   class Clock extends Date { static now() { return now; } }
-  const jsx = (type, props) => ({ type, props });
+  const jsx = (type, props, key) => ({ type, props: { ...props, key } });
+  const uuid = require("node:crypto").randomUUID;
   const biometrics = loadModule("lib/biometrics.ts");
-  const Home = loadModule("app/page.tsx", {
+  const dependencies = {
     react,
     "react/jsx-runtime": { jsx, jsxs: jsx },
     "@/components/ui/button": { Button: "Button" },
@@ -80,8 +117,15 @@ function pageHarness({ sunoDisabled = false } = {}) {
     "@/components/theme-toggle": { default: "ThemeToggle" },
     "@/lib/biometrics": biometrics,
     "@/lib/prompt-builder": { buildPrompt: () => ({ prompt: "genres", style: "genres" }) },
-  }, {
+  };
+  const globals = {
     Date: Clock,
+    window: {
+      addEventListener: (name, callback) => windowListeners.set(name, callback),
+      removeEventListener: (name) => windowListeners.delete(name),
+    },
+    crypto: { randomUUID: uuid },
+    sessionStorage: { getItem: (key) => tabStorage.get(key) ?? null, setItem: (key, value) => tabStorage.set(key, value), removeItem: (key) => tabStorage.delete(key) },
     process: { env: { NEXT_PUBLIC_SUNO_DISABLED: String(sunoDisabled), NODE_ENV: "test" } },
     AbortController,
     setInterval(callback, interval) {
@@ -100,7 +144,7 @@ function pageHarness({ sunoDisabled = false } = {}) {
       const body = options.body ? JSON.parse(options.body) : null;
       requests.push({ url, body, signal: options.signal });
       if (url === "/api/readings") {
-        const response = uploadResponses.length ? uploadResponses.shift() : { ok: true };
+        const response = uploadResponses.length ? uploadResponses.shift() : { ok: true, json: async () => ({ acknowledgedSampleIds: body.readings.map((reading) => reading.sampleId) }) };
         if (!options.signal) return await response;
         let onAbort;
         const aborted = new Promise((_, reject) => {
@@ -110,12 +154,19 @@ function pageHarness({ sunoDisabled = false } = {}) {
         try { return await Promise.race([response, aborted]); }
         finally { options.signal.removeEventListener("abort", onAbort); }
       }
-      if (url === "/api/sessions") return { ok: true, json: async () => body.action ? {} : { sessionId: nextSession++ } };
+      if (url === "/api/sessions") return { ok: true, json: async () => body.action ? { ok: true } : { sessionId: nextSession++, clientSessionId: body.clientSessionId } };
       if (url === "/api/generate") return generationResponses.length ? await generationResponses.shift() : { ok: true, json: async () => ({}) };
       if (url.startsWith("/api/generate/")) return pollResponses.length ? await pollResponses.shift() : { ok: true, json: async () => ({ status: "pending" }) };
       throw new Error(`Unexpected URL: ${url}`);
     },
-  }).default;
+  };
+  const outboxModule = loadModule("lib/recording-outbox.ts", {}, globals);
+  const outboxes = [];
+  class TestOutbox extends outboxModule.RecordingOutbox {
+    constructor() { super(storage, globals.fetch, () => now); outboxes.push(this); }
+  }
+  dependencies["@/lib/recording-outbox"] = { ...outboxModule, RecordingOutbox: TestOutbox };
+  const Home = loadModule("app/page.tsx", dependencies, globals).default;
   function render() {
     do {
       dirty = false;
@@ -135,11 +186,20 @@ function pageHarness({ sunoDisabled = false } = {}) {
     return null;
   }
   async function settle() {
-    for (let i = 0; i < 12; i++) { await Promise.resolve(); if (dirty) render(); }
+    for (let i = 0; i < 150; i++) { await Promise.resolve(); if (dirty) render(); }
   }
   render();
   return {
-    requests, uploadResponses, generationResponses, pollResponses,
+    requests, uploadResponses, generationResponses, pollResponses, storage, tabStorage,
+    flush: () => outboxes[0].flush(),
+    unload() {
+      const event = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
+      windowListeners.get("beforeunload")?.(event);
+      return event;
+    },
+    unmount() { for (const hook of hooks) hook?.cleanup?.(); timers.clear(); },
+    ring: (personId) => find("RingCard", (props) => props.personId === personId),
+    text: () => JSON.stringify(tree),
     get now() { return now; },
     uploads: () => requests.filter((r) => r.url === "/api/readings"),
     generations: () => requests.filter((r) => r.url === "/api/generate"),
@@ -147,6 +207,7 @@ function pageHarness({ sunoDisabled = false } = {}) {
     player: () => find("MusicPlayer"),
     banner: () => find("div", (props) => props.role === "status"),
     async start() {
+      await settle();
       await find("Button", (props) => props.children === "Start Session").onClick();
       await settle();
     },
@@ -156,6 +217,7 @@ function pageHarness({ sunoDisabled = false } = {}) {
       await promise;
       await settle();
     },
+    async next() { await find("Button", (props) => props.children === "New Session").onClick(); await settle(); },
     reading(personId, heartRate, timestamp = now) {
       find("RingCard", (props) => props.personId === personId).onData(personId, {
         heartRate, lastUpdate: timestamp, spo2: null, rawPpg: null,
@@ -181,68 +243,153 @@ function pageHarness({ sunoDisabled = false } = {}) {
   };
 }
 
-test("sparse samples upload once; pre-session data is excluded and sensor time is preserved", async () => {
-  const page = pageHarness();
+test("full time series continues beyond 30 seconds and stops at explicit Stop with original timestamps", async () => {
+  const page = pageHarness({ sunoDisabled: true });
   page.reading(1, 50);
   await page.start();
   await page.advance(1000);
   const measuredAt = page.now - 500;
   page.reading(1, 80, measuredAt);
-  await page.advance(29000);
-  assert.equal(page.uploads().length, 1);
-  assert.equal(page.uploads()[0].body.readings.length, 1);
-  assert.equal(page.uploads()[0].body.readings[0].timestamp, measuredAt);
-  assert.equal(page.generations().length, 1);
-  assert.equal(page.generations()[0].body.snapshot, null);
-  page.reading(1, 100);
-  await page.advance(10000);
-  assert.equal(page.uploads().length, 1, "finished collection must not silently restart");
-  assert.equal(page.generations().length, 1);
+  await page.advance(30000);
+  page.reading(1, 80);
+  page.reading(2, 90);
+  await page.advance(45000);
+  const endedAt = page.now;
+  await page.stop();
+  page.reading(2, 100);
+  await page.advance(5000);
+  const samples = [...page.storage.samples.values()];
+  assert.equal(samples.length, 3);
+  assert.equal(samples[0].timestamp, measuredAt);
+  assert.equal(new Set(samples.map((row) => row.sampleId)).size, 3);
+  assert.deepEqual(samples.map((row) => row.personId), [1, 1, 2]);
+  assert.ok(samples.every((row) => row.spo2 === null && row.hrv === null && row.temperature === null));
+  const session = [...page.storage.sessions.values()][0];
+  assert.equal(session.endedAt, endedAt);
+  assert.equal(session.endAcknowledged, true);
+  assert.equal(page.requests.some((request) => request.url.startsWith("/api/generate")), false);
+  assert.match(page.text(), /Saved/);
 });
 
-test("bursts above ten samples are preserved and successful batches are not resent", async () => {
+test("song-ready finishes recording after generation; snapshot stays in the first 30 seconds", async () => {
   const page = pageHarness();
+  page.generationResponses.push({ ok: true, json: async () => ({ taskId: "song" }) });
+  page.pollResponses.push({ ok: true, json: async () => ({ status: "pending" }) });
+  page.pollResponses.push({ ok: true, json: async () => ({ status: "ready", audioUrl: "https://test.invalid/song.mp3" }) });
   await page.start();
-  for (let i = 0; i < 30; i++) page.reading(i % 2 + 1, 70 + i);
-  await page.advance(10000);
-  assert.equal(page.uploads().length, 1);
-  assert.equal(page.uploads()[0].body.readings.length, 30);
+  for (let i = 0; i < 5; i++) { page.reading(1, 70); page.reading(2, 80); }
+  await page.advance(31000);
+  page.reading(1, 150);
+  await page.advance(18000);
+  page.reading(2, 160);
+  await page.advance(1000);
+  assert.equal(page.session().isActive, false);
+  assert.equal(page.player().currentSong.taskId, "song");
+  assert.equal(page.player().generationProgress, 100);
+  assert.equal(page.generations()[0].body.snapshot.person1.avgHr, 70);
+  assert.equal(page.generations()[0].body.snapshot.person2.avgHr, 80);
+  const session = [...page.storage.sessions.values()][0];
+  assert.equal(session.endedAt - session.startedAt, 50000);
+  assert.equal([...page.storage.samples.values()].length, 12);
+  assert.equal(session.acknowledgedCount, 12);
 });
 
-test("failed HTTP batches are retained, wait for cooldown, and keep their original session", async () => {
-  const page = pageHarness();
+test("New Session resets session/player/genres while retaining both ring connection refs", async () => {
+  const page = pageHarness({ sunoDisabled: true });
+  await page.settle();
+  page.ring(1).onConnectionChange(1, true);
+  page.ring(2).onConnectionChange(2, true);
+  page.ring(1).onGenreChange("rock");
+  page.ring(2).onGenreChange("jazz");
+  await page.settle();
+  const ref1 = page.ring(1).connectionRef;
+  const ref2 = page.ring(2).connectionRef;
+  const connection = { connected: true };
+  ref1.current = connection;
+  const playerKey = page.player().key;
+  await page.start();
+  page.reading(1, 80);
+  await page.stop();
+  await page.next();
+  assert.equal(page.ring(1).connectionRef, ref1);
+  assert.equal(page.ring(2).connectionRef, ref2);
+  assert.equal(ref1.current, connection);
+  assert.equal(page.ring(1).genre, null);
+  assert.equal(page.ring(2).genre, null);
+  assert.equal(page.player().currentSong, null);
+  assert.equal(page.player().history.length, 0);
+  assert.equal(page.player().generationStatus, "");
+  assert.equal(page.player().generationProgress, 0);
+  assert.notEqual(page.player().key, playerKey);
+  assert.equal(page.session().collectSeconds, 0);
+  await page.start();
+  assert.equal(page.session().isActive, true);
+});
+
+test("offline samples survive New Session and retain their original parent identity", async () => {
+  const page = pageHarness({ sunoDisabled: true });
   page.uploadResponses.push({ ok: false, status: 503 });
   await page.start();
   page.reading(1, 70);
   await page.advance(5000);
   await page.stop();
+  const oldId = [...page.storage.sessions.keys()][0];
+  await page.next();
+  assert.equal(page.storage.sessions.get(oldId).retired, true);
   await page.start();
   page.reading(2, 90);
   await page.advance(10000);
-  assert.deepEqual(page.uploads().map((r) => r.body.sessionId), [1, 2]);
+  assert.match(page.text(), /pending upload/);
   await page.advance(5000);
-  assert.deepEqual(page.uploads().map((r) => r.body.sessionId), [1, 2, 1]);
-  assert.equal(page.uploads()[2].body.readings[0].heartRate, 70);
+  assert.equal(page.storage.sessions.has(oldId), false, "only fully acknowledged retired local data is pruned");
+  const uploads = page.uploads();
+  assert.equal(uploads[0].body.readings[0].sampleId, uploads.findLast((row) => row.body.sessionId === 1).body.readings[0].sampleId);
+  assert.equal(uploads.find((row) => row.body.sessionId === 2).body.readings[0].heartRate, 90);
 });
 
-test("samples arriving during an upload remain queued after its acknowledgement", async () => {
+test("reload restores the active recording and durable pending samples without repeating generation", async () => {
   const page = pageHarness();
+  page.generationResponses.push({ ok: true, json: async () => ({ taskId: "already-submitted" }) });
+  await page.start();
+  page.reading(1, 70);
+  await page.advance(30000);
+  page.uploadResponses.push({ ok: false, status: 503 });
+  page.reading(2, 85);
+  await page.advance(5000);
+  const sessionId = [...page.storage.sessions.keys()][0];
+  page.unmount();
+  const reloaded = pageHarness({ storage: page.storage, tabStorage: page.tabStorage, initialNow: page.now });
+  await reloaded.settle();
+  assert.equal(reloaded.session().isActive, true);
+  assert.match(reloaded.session().status, /Music was interrupted/);
+  reloaded.reading(1, 90);
+  await reloaded.advance(35000);
+  assert.equal(reloaded.generations().length, 0);
+  assert.equal([...reloaded.storage.samples.values()].length, 3);
+  assert.equal([...reloaded.storage.sessions.keys()][0], sessionId);
+  await reloaded.stop();
+  assert.equal(reloaded.storage.sessions.get(sessionId).acknowledgedCount, 3);
+});
+
+test("samples arriving during upload retain their own acknowledgement", async () => {
+  const page = pageHarness({ sunoDisabled: true });
   let finish;
   page.uploadResponses.push(new Promise((resolve) => { finish = resolve; }));
   await page.start();
   page.reading(1, 70);
   await page.advance(5000);
+  const firstId = page.uploads()[0].body.readings[0].sampleId;
   page.reading(1, 85);
   await page.advance(5000);
-  assert.equal(page.uploads().length, 1, "in-flight upload cannot be duplicated");
-  finish({ ok: true });
+  assert.equal(page.uploads().length, 1);
+  finish({ ok: true, json: async () => ({ acknowledgedSampleIds: [firstId] }) });
   await page.settle();
-  await page.advance(5000);
-  assert.deepEqual(page.uploads().map((r) => r.body.readings.map((reading) => reading.heartRate)), [[70], [85]]);
+  assert.deepEqual(page.uploads().map((request) => request.body.readings.map((reading) => reading.heartRate)), [[70], [85]]);
+  assert.equal([...page.storage.sessions.values()][0].acknowledgedCount, 2);
 });
 
-test("a hung upload aborts, releases the worker, and retries its retained samples after cooldown", async () => {
-  const page = pageHarness();
+test("hung uploads abort and retry the same retained IDs after cooldown", async () => {
+  const page = pageHarness({ sunoDisabled: true });
   page.uploadResponses.push(new Promise(() => {}));
   await page.start();
   page.reading(1, 70);
@@ -254,77 +401,87 @@ test("a hung upload aborts, releases the worker, and retries its retained sample
   assert.equal(page.uploads()[0].signal.aborted, true);
   await page.advance(15000);
   assert.equal(page.uploads().length, 2);
-  assert.deepEqual(page.uploads()[1].body.readings.map((reading) => reading.heartRate), [70, 85]);
-  await page.advance(10000);
-  assert.equal(page.uploads().length, 2);
+  assert.equal(page.uploads()[1].body.readings[0].sampleId, page.uploads()[0].body.readings[0].sampleId);
+  assert.deepEqual(page.uploads()[1].body.readings.map((row) => row.heartRate), [70, 85]);
 });
 
-test("a stopped session's in-flight song response cannot stop or update a newer session", async () => {
+test("old in-flight song response cannot finish or update a newer recording", async () => {
   const page = pageHarness();
   page.generationResponses.push({ ok: true, json: async () => ({ taskId: "old-task" }) });
   let finishPoll;
   page.pollResponses.push(new Promise((resolve) => { finishPoll = resolve; }));
   await page.start();
   await page.advance(40000);
-  assert.equal(page.requests.filter((request) => request.url === "/api/generate/old-task").length, 1);
   await page.stop();
+  await page.next();
   await page.start();
-  finishPoll({ ok: true, json: async () => ({ status: "ready", audioUrl: "https://test.invalid/old-song.mp3" }) });
+  finishPoll({ ok: true, json: async () => ({ status: "ready", audioUrl: "https://test.invalid/old.mp3" }) });
   await page.settle();
   assert.equal(page.session().isActive, true);
-  assert.equal(page.session().status, "Collecting biometric data...");
   assert.equal(page.player().currentSong, null);
-  const progress = page.player().generationProgress;
-  await page.advance(1000);
-  assert.equal(page.player().generationProgress, progress, "cancelled progress animation cannot update newer state");
-  await page.advance(29000);
-  assert.equal(page.generations().length, 2, "new session reaches its own generation window");
-  assert.equal(page.generations()[1].body.sessionId, 2);
+  assert.equal(page.player().generationProgress, 0);
+  await page.advance(30000);
+  assert.equal(page.generations().length, 2);
 });
 
-test("a late generation submission response cannot start polling after its session was stopped", async () => {
+test("late generation submission cannot start polling after Stop", async () => {
   const page = pageHarness();
-  let finishGeneration;
-  page.generationResponses.push(new Promise((resolve) => { finishGeneration = resolve; }));
+  let finish;
+  page.generationResponses.push(new Promise((resolve) => { finish = resolve; }));
   await page.start();
   await page.advance(30000);
   await page.stop();
+  await page.next();
   await page.start();
-  finishGeneration({ ok: true, json: async () => ({ taskId: "cancelled-task" }) });
-  await page.settle();
+  finish({ ok: true, json: async () => ({ taskId: "cancelled" }) });
   await page.advance(10000);
-  assert.equal(page.session().status, "Collecting biometric data...");
-  assert.equal(page.requests.some((request) => request.url === "/api/generate/cancelled-task"), false);
+  assert.equal(page.requests.some((request) => request.url === "/api/generate/cancelled"), false);
+  assert.equal(page.session().isActive, true);
 });
 
-test("ring-test mode collects readings without any generation or polling request", async () => {
+test("storage failures show unsaved data, retain samples for retry, and block reset until the end is durable", async () => {
   const page = pageHarness({ sunoDisabled: true });
-  assert.equal(page.banner().children, "Music generation paused for ring tests");
   await page.start();
-  page.reading(1, 80);
-  await page.advance(40000);
-  assert.equal(page.uploads().length, 1);
-  assert.equal(page.requests.some((request) => request.url.startsWith("/api/generate")), false);
-  assert.equal(page.session().isActive, false);
-  assert.equal(page.player().generationStatus, "Music generation paused for ring tests");
-  await page.start();
-  assert.equal(page.session().isActive, true, "ring collection can be started again");
+  page.storage.failWrites = true;
+  page.reading(1, 75);
+  await page.settle();
+  assert.match(page.text(), /Local storage needs attention/);
+  assert.match(page.text(), /only in memory/);
+  assert.equal(page.unload().defaultPrevented, true);
+  await page.stop();
+  assert.match(page.text(), /Retry Stop/);
+  assert.doesNotMatch(page.text(), /New Session/);
+  page.storage.failWrites = false;
+  await page.stop();
+  await page.advance(5000);
+  assert.equal([...page.storage.samples.values()].length, 1);
+  assert.match(page.text(), /Saved/);
+  assert.equal(page.unload().defaultPrevented, false);
 });
 
-test("server pause response stops a stale client's active music poll", async () => {
+test("one measured participant never creates a fabricated two-person snapshot", async () => {
   const page = pageHarness();
-  page.generationResponses.push({ ok: true, json: async () => ({ taskId: "paused-task" }) });
+  await page.start();
+  for (let i = 0; i < 8; i++) page.reading(1, 80 + i);
+  await page.advance(30000);
+  assert.equal(page.generations()[0].body.snapshot, null);
+  assert.equal([...page.storage.samples.values()].length, 8);
+});
+
+test("server pause stops polling while full recording continues", async () => {
+  const page = pageHarness();
+  page.generationResponses.push({ ok: true, json: async () => ({ taskId: "paused" }) });
   page.pollResponses.push({ ok: false, status: 423 });
   await page.start();
   await page.advance(70000);
-  assert.equal(page.requests.filter((request) => request.url === "/api/generate/paused-task").length, 1);
-  assert.equal(page.session().isActive, false);
+  assert.equal(page.requests.filter((request) => request.url === "/api/generate/paused").length, 1);
+  assert.equal(page.session().isActive, true);
   assert.equal(page.player().generationStatus, "Music generation paused for ring tests");
   assert.equal(page.player().generationProgress, 0);
 });
 
-test("both disabled Suno routes return 423 before body/params, network, or database work", async () => {
-  const forbidden = () => { throw new Error("Disabled Suno route attempted a side effect"); };
+test("both disabled Suno routes return 423 before request parsing or external side effects", async () => {
+  const forbidden = () => { throw new Error("Disabled route side effect"); };
   const dependencies = {
     "next/server": { NextResponse: { json: (body, options = {}) => ({ body, status: options.status ?? 200 }) } },
     "@/lib/db": { insertSong: forbidden, updateSongAudio: forbidden },
@@ -332,65 +489,30 @@ test("both disabled Suno routes return 423 before body/params, network, or datab
   const globals = { process: { env: { SUNO_DISABLED: "true" } }, fetch: forbidden };
   const generate = loadModule("app/api/generate/route.ts", dependencies, globals);
   const status = loadModule("app/api/generate/[taskId]/route.ts", dependencies, globals);
-  const post = await generate.POST({ json: forbidden });
-  const get = await status.GET({}, { params: { then: forbidden } });
-  assert.equal(post.status, 423);
-  assert.equal(get.status, 423);
-  assert.equal(post.body.error, "Music generation paused for ring tests");
-  assert.equal(get.body.error, post.body.error);
+  assert.equal((await generate.POST({ json: forbidden })).status, 423);
+  assert.equal((await status.GET({}, { params: { then: forbidden } })).status, 423);
 });
 
-test("snapshot uses only the current window and never substitutes a missing person", async () => {
-  const page = pageHarness();
-  await page.start();
-  for (let i = 0; i < 10; i++) page.reading(1, 55);
-  await page.stop();
-  await page.start();
-  for (let i = 0; i < 5; i++) {
-    page.reading(1, 100);
-    page.reading(2, 80);
-  }
-  page.reading(1, 40, page.now - 1);
-  await page.advance(30000);
-  const snapshot = page.generations()[0].body.snapshot;
-  assert.equal(snapshot.person1.avgHr, 100);
-  assert.equal(snapshot.person2.avgHr, 80);
-  assert.equal(snapshot.person1.sampleCount, 5);
-});
-
-test("one measured person does not create a fabricated two-person snapshot", async () => {
-  const page = pageHarness();
-  await page.start();
-  for (let i = 0; i < 8; i++) page.reading(1, 80 + i);
-  await page.advance(30000);
-  assert.equal(page.generations()[0].body.snapshot, null);
-  assert.equal(page.uploads()[0].body.readings.length, 8, "individual readings are still saved");
-});
-
-test("readings API rejects missing acquisition time before reaching the database", async () => {
-  const inserted = [];
-  const route = loadModule("app/api/readings/route.ts", {
-    "next/server": { NextResponse: { json: (body, options = {}) => ({ body, status: options.status ?? 200 }) } },
-    "@/lib/db": { insertReadings: async (...args) => { inserted.push(args); return args[1].length; } },
-  });
-  const invalid = await route.POST({ json: async () => ({ sessionId: 1, readings: [{ personId: 1 }] }) });
-  assert.equal(invalid.status, 400);
-  assert.equal(inserted.length, 0);
-  const valid = await route.POST({ json: async () => ({ sessionId: 1, readings: [{ personId: 1, timestamp: 1_800_000_000_000 }] }) });
-  assert.equal(valid.status, 200);
-  assert.equal(inserted[0][1][0].timestamp, 1_800_000_000_000);
-});
-
-test("database writes sensor timestamps in one atomic batch", async () => {
-  const transactions = [];
-  const sql = (strings, ...values) => ({ statement: strings.join("?"), values });
-  sql.transaction = async (queries) => { transactions.push(queries); };
-  const db = loadModule("lib/db.ts", { "@neondatabase/serverless": { neon: () => sql } }, { process: { env: {} } });
-  const timestamp = 1_800_000_000_000;
-  const sample = { personId: 1, timestamp, heartRate: 80, spo2: null, temperature: null, hrv: null, rawPpg: null, accelX: null, accelY: null, accelZ: null };
-  assert.equal(await db.insertReadings(7, [sample, { ...sample, personId: 2 }]), 2);
-  assert.equal(transactions.length, 1);
-  assert.equal(transactions[0].length, 2);
-  assert.match(transactions[0][0].statement, /person_id, timestamp, heart_rate/);
-  assert.equal(transactions[0][0].values[2], new Date(timestamp).toISOString());
+test("fresh callbacks during slow local session creation are retained from Start time", async () => {
+  const page = pageHarness({ sunoDisabled: true });
+  const create = page.storage.createSession.bind(page.storage);
+  let finishCreate;
+  page.storage.createSession = async (row) => {
+    await new Promise((resolve) => { finishCreate = resolve; });
+    await create(row);
+  };
+  const starting = page.start();
+  await page.settle();
+  const startedAt = page.now;
+  await page.advance(1000);
+  page.reading(1, 75);
+  page.reading(2, 85);
+  assert.equal(page.unload().defaultPrevented, true);
+  finishCreate();
+  await starting;
+  await page.flush();
+  const samples = [...page.storage.samples.values()];
+  assert.equal(samples.length, 2);
+  assert.equal(samples[0].timestamp, startedAt + 1000);
+  assert.equal([...page.storage.sessions.values()][0].startedAt, startedAt);
 });

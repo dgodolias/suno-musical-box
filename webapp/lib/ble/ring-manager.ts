@@ -2,10 +2,12 @@ import {
   buildBatteryCommand,
   buildContinueHRCommand,
   buildHeartRateStartCommand,
+  buildOpticalDiagnosticCommand,
   buildStopCommand,
   COLMI_RX_UUID,
   COLMI_SERVICE_UUID,
   COLMI_TX_UUID,
+  hasValidFixedPacketChecksum,
   parseNotification,
   RealTimeType,
 } from "./colmi-protocol";
@@ -14,6 +16,7 @@ import type { HeartRateMode } from "./colmi-protocol";
 export type { HeartRateMode } from "./colmi-protocol";
 
 export type ConnectionState = "disconnected" | "scanning" | "connecting" | "connected";
+export type OpticalDiagnosticState = "idle" | "preparing" | "capturing" | "stopping" | "completed" | "error";
 
 export interface RingData {
   heartRate: number | null;
@@ -28,7 +31,7 @@ export interface RingData {
 }
 
 export interface RingDiagnostics {
-  measurementState: "idle" | "warming-up" | "measuring" | "stale" | "waiting-for-contact" | "error";
+  measurementState: "idle" | "warming-up" | "measuring" | "stale" | "waiting-for-contact" | "optical-test" | "paused" | "error";
   packetsReceived: number;
   heartRateSamples: number;
   lastHeartRateAt: number;
@@ -39,6 +42,21 @@ export interface RingDiagnostics {
   lastError: string | null;
   firmware: string | null;
   hardware: string | null;
+  opticalState: OpticalDiagnosticState;
+  opticalFramesReceived: number;
+  opticalEndsAt: number;
+  lastBatteryAt: number;
+  batteryError: string | null;
+}
+
+interface OpticalDiagnosticReport {
+  phase: OpticalDiagnosticState;
+  durationMs: number;
+  startedAt: number | null;
+  stopRequestedAt: number | null;
+  stopSentAt: number | null;
+  completedAt: number | null;
+  frames: { at: string; hex: string; length: number; checksumValid: boolean; kind: number | null }[];
 }
 
 interface DebugEvent {
@@ -58,6 +76,11 @@ const MODE_SWITCH_QUIET_MS = 2_000;
 const DISCONNECT_TIMEOUT_MS = 3_000;
 const REALTIME_CAPTURE_TIMEOUT_MS = 90_000;
 const CONTACT_RETRY_MS = 3_000;
+const BATTERY_REFRESH_MS = 60_000;
+const OPTICAL_STOP_OBSERVATION_MS = 5_000;
+const OPTICAL_STOP_GRACE_MS = 2_000;
+const OPTICAL_FRAME_LIMIT = 512;
+const OPTICAL_HR_IN_FLIGHT_GRACE_MS = 500;
 const VERIFIED_REALTIME_PROFILES = [
   { firmware: "RT02R_3.11.00_250611", hardware: "RT02R_V3.1" },
   { firmware: "R02_3.00.17_240903", hardware: "R02_V3.0" },
@@ -68,7 +91,7 @@ function emptyData(): RingData {
 }
 
 function emptyDiagnostics(): RingDiagnostics {
-  return { measurementState: "idle", packetsReceived: 0, heartRateSamples: 0, lastHeartRateAt: 0, lastPacketAt: 0, startsSent: 0, continuesSent: 0, restartCount: 0, lastError: null, firmware: null, hardware: null };
+  return { measurementState: "idle", packetsReceived: 0, heartRateSamples: 0, lastHeartRateAt: 0, lastPacketAt: 0, startsSent: 0, continuesSent: 0, restartCount: 0, lastError: null, firmware: null, hardware: null, opticalState: "idle", opticalFramesReceived: 0, opticalEndsAt: 0, lastBatteryAt: 0, batteryError: null };
 }
 
 function errorMessage(error: unknown): string {
@@ -96,6 +119,8 @@ export class RingConnection {
   onDiagnostics: (diagnostics: RingDiagnostics) => void = () => {};
 
   private generation = 0;
+  private lastBatteryRequestAt = 0;
+  private batteryRequest: Promise<void> | null = null;
   private measurementGeneration = 0;
   private measurementWanted = false;
   private watchdog: ReturnType<typeof setInterval> | null = null;
@@ -118,6 +143,16 @@ export class RingConnection {
   private heartRateModeExplicit = false;
   private modeSwitchTimer: ReturnType<typeof setTimeout> | null = null;
   private resolveModeSwitchDelay: (() => void) | null = null;
+  private controlGeneration = 0;
+  private opticalGeneration = 0;
+  private opticalDiagnostic: OpticalDiagnosticReport | null = null;
+  private opticalStarting: Promise<void> | null = null;
+  private opticalStopping: Promise<void> | null = null;
+  private opticalTimer: ReturnType<typeof setTimeout> | null = null;
+  private resolveOpticalDelay: (() => void) | null = null;
+  private opticalWriteCancels = new Set<() => void>();
+  private opticalNormalStopAt = 0;
+  private opticalPreparationHeartRateAt = 0;
 
   constructor(public personId: 1 | 2) {}
 
@@ -151,6 +186,7 @@ export class RingConnection {
         ? "Realtime heart rate (type 6), no CONTINUE"
         : `Heart rate (type 1), ${this.selectedHeartRateMode} START, one CONTINUE after silence with 60s recovery grace`,
       diagnostics: this.diagnostics, events: this.debugEvents,
+      opticalDiagnostic: this.opticalDiagnostic,
     }, null, 2);
   }
 
@@ -202,6 +238,13 @@ export class RingConnection {
   }
 
   private handleDisconnected = () => {
+    this.controlGeneration++;
+    if (this.opticalActive) {
+      this.opticalGeneration++;
+      this.cancelOpticalWaits();
+      this.setOpticalState("error");
+      if (this.opticalDiagnostic) this.opticalDiagnostic.completedAt = Date.now();
+    }
     this.generation++;
     this.stopWatchdog();
     this.detachListeners();
@@ -268,6 +311,8 @@ export class RingConnection {
     this.detachListeners();
     this.resetData();
     this.diagnostics = emptyDiagnostics();
+    this.lastBatteryRequestAt = 0;
+    this.batteryRequest = null;
     this.emitDiagnostics();
     this.setState("connecting");
     device.addEventListener("gattserverdisconnected", this.handleDisconnected);
@@ -291,7 +336,7 @@ export class RingConnection {
       this.selectVerifiedMeasurementMode();
       this.setState("connected");
       this.record("event", "Connected; notifications ready");
-      await this.write(buildBatteryCommand(), "BATTERY", generation);
+      await this.refreshBattery(true);
       if (generation !== this.generation) return false;
       await this.beginMeasurement();
       return generation === this.generation && this.state === "connected";
@@ -306,6 +351,41 @@ export class RingConnection {
       this.setState("disconnected");
       this.fail(`Connection failed: ${errorMessage(error)}`);
       return false;
+    }
+  }
+
+  /** Called by the connected card's clock; requesting battery never restarts HR. */
+  refreshBattery(force = false): Promise<void> {
+    if (this.state !== "connected" || this.closing || this.opticalActive) return Promise.resolve();
+    if (this.batteryRequest) return this.batteryRequest;
+    if (!force && Date.now() - this.lastBatteryRequestAt < BATTERY_REFRESH_MS) return Promise.resolve();
+    this.lastBatteryRequestAt = Date.now();
+    const generation = this.generation;
+    const operation = this.readBattery(generation);
+    this.batteryRequest = operation;
+    void operation.finally(() => { if (this.batteryRequest === operation) this.batteryRequest = null; });
+    return operation;
+  }
+
+  private async readBattery(generation: number) {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const outcome = await Promise.race([
+        this.write(buildBatteryCommand(), "BATTERY", generation).then((sent) => sent ? "sent" : "failed"),
+        new Promise<"timed-out">((resolve) => {
+          timer = setTimeout(() => resolve("timed-out"), DISCONNECT_TIMEOUT_MS);
+        }),
+      ]);
+      if (generation !== this.generation) return;
+      if (outcome === "timed-out") {
+        this.stopWatchdog();
+        this.closeGatt();
+        this.resetData();
+        this.setState("disconnected");
+        this.fail("Battery request stalled Bluetooth; reconnect the ring to resume measurements.");
+      }
+    } finally {
+      if (timer !== null) clearTimeout(timer);
     }
   }
 
@@ -345,6 +425,188 @@ export class RingConnection {
     this.emitDiagnostics();
   }
 
+  private get opticalActive(): boolean {
+    return this.diagnostics.opticalState === "preparing" ||
+      this.diagnostics.opticalState === "capturing" || this.diagnostics.opticalState === "stopping";
+  }
+
+  private setOpticalState(phase: OpticalDiagnosticState, endsAt = 0) {
+    this.diagnostics.opticalState = phase;
+    this.diagnostics.opticalEndsAt = endsAt;
+    if (this.opticalDiagnostic) this.opticalDiagnostic.phase = phase;
+  }
+
+  private cancelOpticalWaits() {
+    if (this.opticalTimer !== null) clearTimeout(this.opticalTimer);
+    this.opticalTimer = null;
+    const resolve = this.resolveOpticalDelay;
+    this.resolveOpticalDelay = null;
+    resolve?.();
+    for (const cancel of this.opticalWriteCancels) cancel();
+  }
+
+  private opticalDelay(milliseconds: number): Promise<void> {
+    return new Promise((resolve) => {
+      this.resolveOpticalDelay = resolve;
+      this.opticalTimer = setTimeout(() => {
+        this.opticalTimer = null;
+        this.resolveOpticalDelay = null;
+        resolve();
+      }, milliseconds);
+    });
+  }
+
+  private async opticalWrite(command: ArrayBuffer, label: string, generation: number, measurementGeneration: number) {
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    let cancel = () => {};
+    const cancelled = new Promise<"cancelled">((resolve) => {
+      cancel = () => resolve("cancelled");
+      this.opticalWriteCancels.add(cancel);
+    });
+    try {
+      return await Promise.race([
+        this.write(command, label, generation, measurementGeneration).then((sent) => sent ? "sent" as const : "failed" as const),
+        new Promise<"timed-out">((resolve) => { timeout = setTimeout(() => resolve("timed-out"), DISCONNECT_TIMEOUT_MS); }),
+        cancelled,
+      ]);
+    } finally {
+      if (timeout !== null) clearTimeout(timeout);
+      this.opticalWriteCancels.delete(cancel);
+    }
+  }
+
+  private opticalTokenCurrent(generation: number, opticalGeneration: number): boolean {
+    return generation === this.generation && opticalGeneration === this.opticalGeneration && this.state === "connected";
+  }
+
+  private failOpticalDiagnostic(message: string) {
+    this.opticalGeneration++;
+    this.cancelOpticalWaits();
+    this.stopWatchdog();
+    this.setOpticalState("error");
+    if (this.opticalDiagnostic) this.opticalDiagnostic.completedAt = Date.now();
+    this.closeGatt();
+    this.resetData();
+    this.setState("disconnected");
+    this.fail(message);
+  }
+
+  async startOpticalDiagnostic(duration = 15_000): Promise<void> {
+    if (duration !== 15_000 && duration !== 30_000) throw new Error("Optical diagnostics support only 15 or 30 seconds.");
+    if (this.closing || this.state !== "connected") throw new Error("Connect the ring before starting an optical diagnostic.");
+    if (!this.hasVerifiedRealtimeProfile()) throw new Error("Optical diagnostics are limited to the two verified hardware and firmware profiles.");
+    if (this.diagnostics.hardware === "RT02R_V3.1") {
+      throw new Error("Optical diagnostics disabled: this profile kept its sensor LEDs active after raw STOP and disconnect.");
+    }
+    if (this.opticalStarting) return this.opticalStarting;
+    if (this.opticalActive) return;
+    this.controlGeneration++;
+    const operation = this.prepareOpticalDiagnostic(duration);
+    this.opticalStarting = operation;
+    try { await operation; }
+    finally { if (this.opticalStarting === operation) this.opticalStarting = null; }
+  }
+
+  private async prepareOpticalDiagnostic(duration: number) {
+    this.stopWatchdog();
+    this.cancelOpticalWaits();
+    const generation = this.generation;
+    const opticalGeneration = ++this.opticalGeneration;
+    const measurementGeneration = this.measurementGeneration;
+    this.opticalDiagnostic = {
+      phase: "preparing", durationMs: duration, startedAt: null,
+      stopRequestedAt: null, stopSentAt: null, completedAt: null, frames: [],
+    };
+    this.diagnostics.opticalFramesReceived = 0;
+    this.opticalNormalStopAt = 0;
+    this.opticalPreparationHeartRateAt = 0;
+    this.setOpticalState("preparing");
+    this.data.spo2 = null;
+    this.data.rawPpg = null;
+    this.data.accelX = this.data.accelY = this.data.accelZ = null;
+    this.clearLiveHeartRate();
+    this.diagnostics.measurementState = "optical-test";
+    this.diagnostics.lastError = null;
+    this.record("event", `Preparing isolated optical diagnostic (${duration / 1000}s); normal measurement paused`);
+    this.emitDiagnostics();
+    const stopped = await this.opticalWrite(buildStopCommand(this.measurementType), "STOP", generation, measurementGeneration);
+    if (!this.opticalTokenCurrent(generation, opticalGeneration)) return;
+    if (stopped !== "sent") {
+      this.failOpticalDiagnostic("Normal measurement STOP did not complete; optical diagnostic cancelled and Bluetooth closed.");
+      return;
+    }
+    this.opticalNormalStopAt = Date.now();
+    this.setOpticalState("preparing", this.opticalNormalStopAt + MODE_SWITCH_QUIET_MS);
+    this.emitDiagnostics();
+    await this.opticalDelay(MODE_SWITCH_QUIET_MS);
+    if (!this.opticalTokenCurrent(generation, opticalGeneration) || this.closing) return;
+    if (this.opticalPreparationHeartRateAt > this.opticalNormalStopAt + OPTICAL_HR_IN_FLIGHT_GRACE_MS) {
+      this.failOpticalDiagnostic("Heart-rate notifications continued after normal STOP; optical diagnostic cancelled and Bluetooth closed.");
+      return;
+    }
+    const started = await this.opticalWrite(buildOpticalDiagnosticCommand(true), "OPTICAL_START", generation, measurementGeneration);
+    if (!this.opticalTokenCurrent(generation, opticalGeneration)) return;
+    if (started !== "sent") {
+      // A failed/late native write may still have reached the device. Always
+      // attempt the documented raw STOP before considering this capture closed.
+      this.record("event", "Optical START did not complete; cleaning up raw mode");
+      await this.ensureOpticalStopped();
+      if (this.state === "connected") this.fail("Optical START did not complete. Measurement remains paused.");
+      return;
+    }
+    this.opticalDiagnostic.startedAt = Date.now();
+    this.setOpticalState("capturing", this.opticalDiagnostic.startedAt + duration);
+    this.opticalTimer = setTimeout(() => {
+      this.opticalTimer = null;
+      void this.ensureOpticalStopped();
+    }, duration);
+    this.emitDiagnostics();
+  }
+
+  stopOpticalDiagnostic(): Promise<void> {
+    if (this.opticalActive) this.controlGeneration++;
+    return this.ensureOpticalStopped();
+  }
+
+  private ensureOpticalStopped(): Promise<void> {
+    if (this.opticalStopping) return this.opticalStopping;
+    if (!this.opticalActive) return Promise.resolve();
+    const operation = this.finishOpticalDiagnostic();
+    this.opticalStopping = operation;
+    void operation.finally(() => { if (this.opticalStopping === operation) this.opticalStopping = null; });
+    return operation;
+  }
+
+  private async finishOpticalDiagnostic() {
+    const generation = this.generation;
+    const opticalGeneration = ++this.opticalGeneration;
+    this.cancelOpticalWaits();
+    this.stopWatchdog();
+    const measurementGeneration = this.measurementGeneration;
+    this.setOpticalState("stopping");
+    if (this.opticalDiagnostic) this.opticalDiagnostic.stopRequestedAt = Date.now();
+    this.emitDiagnostics();
+    // This also cancels preparation safely: the queued raw START has an older
+    // measurement token, and any already-started native write drains before STOP.
+    const stopped = await this.opticalWrite(buildOpticalDiagnosticCommand(false), "OPTICAL_STOP", generation, measurementGeneration);
+    if (!this.opticalTokenCurrent(generation, opticalGeneration)) return;
+    if (stopped !== "sent") {
+      this.failOpticalDiagnostic("Optical STOP did not complete; the Bluetooth connection was closed.");
+      return;
+    }
+    const stoppedAt = Date.now();
+    if (this.opticalDiagnostic) this.opticalDiagnostic.stopSentAt = stoppedAt;
+    this.setOpticalState("stopping", stoppedAt + OPTICAL_STOP_OBSERVATION_MS);
+    this.emitDiagnostics();
+    await this.opticalDelay(OPTICAL_STOP_OBSERVATION_MS);
+    if (!this.opticalTokenCurrent(generation, opticalGeneration)) return;
+    this.setOpticalState("completed");
+    if (this.opticalDiagnostic) this.opticalDiagnostic.completedAt = Date.now();
+    this.diagnostics.measurementState = "paused";
+    this.record("event", "Optical STOP observed for 5 seconds; normal measurement remains paused until Retry");
+    this.emitDiagnostics();
+  }
+
   /** All writes share one queue, including battery, retries, and STOP. */
   private write(command: ArrayBuffer, label: string, generation: number, measurementGeneration?: number): Promise<boolean> {
     const characteristic = this.rxChar;
@@ -361,7 +623,14 @@ export class RingConnection {
         this.emitDiagnostics();
         return true;
       } catch (error) {
-        if (generation === this.generation) this.fail(`${label} failed: ${errorMessage(error)}`);
+        if (generation === this.generation) {
+          const message = `${label} failed: ${errorMessage(error)}`;
+          if (label === "BATTERY") {
+            this.diagnostics.batteryError = message;
+            this.record("event", message);
+            this.emitDiagnostics();
+          } else this.fail(message);
+        }
         return false;
       }
     });
@@ -370,7 +639,7 @@ export class RingConnection {
   }
 
   async beginMeasurement(): Promise<void> {
-    if (this.measurementWanted || this.recoveryPending || this.closing || this.state !== "connected") return;
+    if (this.opticalActive || this.diagnostics.measurementState === "paused" || this.measurementWanted || this.recoveryPending || this.closing || this.state !== "connected") return;
     this.measurementWanted = true;
     this.automaticRecoveries = 0;
     this.measurementGeneration++;
@@ -379,6 +648,9 @@ export class RingConnection {
 
   async retryMeasurement(): Promise<void> {
     if (this.closing || this.state !== "connected" || this.recoveryPending) return;
+    const controlGeneration = ++this.controlGeneration;
+    if (this.opticalActive) await this.ensureOpticalStopped();
+    if (controlGeneration !== this.controlGeneration || this.closing || this.state !== "connected") return;
     this.measurementWanted = true;
     this.automaticRecoveries = 0;
     this.measurementGeneration++;
@@ -390,6 +662,9 @@ export class RingConnection {
 
   async setHeartRateMode(mode: HeartRateMode): Promise<void> {
     if (mode !== "standard" && mode !== "legacy" && mode !== "realtime") throw new Error("Unsupported heart-rate mode");
+    const controlGeneration = ++this.controlGeneration;
+    if (this.opticalActive) await this.ensureOpticalStopped();
+    if (controlGeneration !== this.controlGeneration) return;
     this.heartRateModeExplicit = true;
     if (mode === this.selectedHeartRateMode) return;
     const previousType = this.measurementType;
@@ -547,6 +822,7 @@ export class RingConnection {
 
   disconnect(): Promise<void> {
     if (this.closing) return this.closing;
+    this.controlGeneration++;
     const operation = this.disconnectDevice();
     this.closing = operation;
     void operation.finally(() => { if (this.closing === operation) this.closing = null; });
@@ -593,6 +869,7 @@ export class RingConnection {
   }
 
   private async disconnectDevice() {
+    if (this.opticalActive) await this.ensureOpticalStopped();
     const generation = ++this.generation;
     this.stopWatchdog();
     this.detachListeners();
@@ -619,20 +896,54 @@ export class RingConnection {
 
   private handleNotification = (event: Event) => {
     const target = event.target as BluetoothRemoteGATTCharacteristic;
-    if (target !== this.txChar || this.state !== "connected" || this.closing) return;
+    if (target !== this.txChar || this.state !== "connected" || (this.closing && !this.opticalActive)) return;
     const value = target.value;
     if (!value) return;
     const now = Date.now();
     this.record("received", hex(value));
     this.diagnostics.packetsReceived++;
     this.diagnostics.lastPacketAt = now;
+    // Diagnostic packets are evidence, never physiological observations. Keep
+    // quarantining late A1 packets after completion, including corrupt frames.
+    if (value.byteLength > 0 && value.getUint8(0) === 0xa1 && this.opticalDiagnostic) {
+      this.opticalDiagnostic.frames.push({
+        at: new Date(now).toISOString(), hex: hex(value), length: value.byteLength,
+        checksumValid: hasValidFixedPacketChecksum(value),
+        kind: value.byteLength > 1 ? value.getUint8(1) : null,
+      });
+      if (this.opticalDiagnostic.frames.length > OPTICAL_FRAME_LIMIT) this.opticalDiagnostic.frames.shift();
+      this.diagnostics.opticalFramesReceived++;
+      const stoppedAt = this.opticalDiagnostic.stopSentAt;
+      if (stoppedAt !== null && now - stoppedAt > OPTICAL_STOP_GRACE_MS &&
+        (this.diagnostics.opticalState === "stopping" || this.diagnostics.opticalState === "completed")) {
+        this.failOpticalDiagnostic("Raw notifications continued after optical STOP; the Bluetooth connection was closed.");
+      } else this.emitDiagnostics();
+      return;
+    }
     const parsed = parseNotification(value);
     if (!parsed) { this.emitDiagnostics(); return; }
+    if (parsed.command === 0x03) {
+      if (parsed.status === "invalid" || parsed.batteryLevel === undefined) {
+        this.diagnostics.batteryError = parsed.error ?? "Invalid battery response";
+        this.record("event", this.diagnostics.batteryError);
+        this.emitDiagnostics();
+        return;
+      }
+      this.diagnostics.lastBatteryAt = now;
+      this.diagnostics.batteryError = null;
+    }
     const isHeartRatePacket = parsed.command === 0x1e || (parsed.command === 0x69 &&
       (parsed.type === RealTimeType.HEART_RATE || parsed.type === RealTimeType.REAL_TIME_HEART_RATE));
     const isSelectedSource = this.selectedHeartRateMode === "realtime"
       ? parsed.command === 0x1e || (parsed.command === 0x69 && parsed.type === RealTimeType.REAL_TIME_HEART_RATE)
       : parsed.command === 0x69 && parsed.type === RealTimeType.HEART_RATE;
+    if (this.opticalActive && isHeartRatePacket) {
+      if (this.diagnostics.opticalState === "preparing" && parsed.heartRate !== undefined) {
+        this.opticalPreparationHeartRateAt = now;
+      }
+      this.emitDiagnostics();
+      return;
+    }
     // Keep all frames in the raw trace, but do not record trailing packets from
     // another mode as observations of the currently selected measurement.
     if (isHeartRatePacket && !isSelectedSource) { this.emitDiagnostics(); return; }
