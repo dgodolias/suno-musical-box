@@ -6,11 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import GenrePicker from "@/components/genre-picker";
 import { Bluetooth, HeartPulse, UserRound } from "lucide-react";
-import {
-  RingConnection,
-  type ConnectionState,
-  type RingData,
-} from "@/lib/ble/ring-manager";
+import { HR_STALE_MS, RingConnection } from "@/lib/ble/ring-manager";
+import type { ConnectionState, HeartRateMode, RingData, RingDiagnostics } from "@/lib/ble/ring-manager";
 
 interface RingCardProps {
   personId: 1 | 2;
@@ -50,11 +47,20 @@ export default function RingCard({
     lastUpdate: 0,
   });
   const [name, setName] = useState<string>("");
+  const [diagnostics, setDiagnostics] = useState<RingDiagnostics | null>(null);
+  const [now, setNow] = useState(0);
+  const [retrying, setRetrying] = useState(false);
+  const [measurementMode, setMeasurementMode] = useState<HeartRateMode>("standard");
+  const [diagnosticMessage, setDiagnosticMessage] = useState("");
+  const [diagnosticReport, setDiagnosticReport] = useState("");
   const ringRef = useRef<RingConnection | null>(null);
   const onDataRef = useRef(onData);
   const onConnectionChangeRef = useRef(onConnectionChange);
-  onDataRef.current = onData;
-  onConnectionChangeRef.current = onConnectionChange;
+
+  useEffect(() => {
+    onDataRef.current = onData;
+    onConnectionChangeRef.current = onConnectionChange;
+  }, [onData, onConnectionChange]);
 
   // Real BLE connection — only re-create when personId or mockMode changes
   useEffect(() => {
@@ -68,35 +74,98 @@ export default function RingCard({
     };
     ring.onData = (d) => {
       setData(d);
+    };
+    // Only a new HR notification becomes a recorded observation. Battery and
+    // connection updates may contain the previous HR in the display snapshot.
+    ring.onHeartRate = (d) => {
       onDataRef.current?.(personId, d);
+    };
+    ring.onDiagnostics = (nextDiagnostics) => {
+      setDiagnostics(nextDiagnostics);
+      setMeasurementMode(ring.heartRateMode);
     };
     ringRef.current = ring;
     if (connectionRef) connectionRef.current = ring;
 
     return () => {
-      ring.disconnect();
+      ring.onStateChange = () => {};
+      ring.onData = () => {};
+      ring.onHeartRate = () => {};
+      ring.onDiagnostics = () => {};
+      if (connectionRef?.current === ring) connectionRef.current = null;
+      void ring.disconnect();
     };
   }, [personId, mockMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Mock mode: reflect mock data into display
+  // Advance the age even when the ring has stopped sending notifications.
   useEffect(() => {
-    if (mockMode && mockData) {
-      setData(mockData);
-    }
-  }, [mockMode, mockData]);
+    if (state !== "connected" || mockMode) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [state, mockMode]);
 
   const handleScan = useCallback(() => {
     ringRef.current?.scan();
   }, []);
 
   const handleDisconnect = useCallback(() => {
-    ringRef.current?.disconnect();
+    void ringRef.current?.disconnect();
     setName("");
   }, []);
+
+  const handleRetry = async () => {
+    setRetrying(true);
+    setDiagnosticMessage("");
+    try {
+      await ringRef.current?.retryMeasurement();
+    } catch (error) {
+      setDiagnosticMessage(error instanceof Error ? error.message : "Could not restart measurement.");
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  const copyDiagnostics = async () => {
+    const report = ringRef.current?.getDebugReport();
+    if (!report) return;
+    try {
+      await navigator.clipboard.writeText(report);
+      setDiagnosticReport("");
+      setDiagnosticMessage("Diagnostics copied.");
+    } catch {
+      setDiagnosticReport(report);
+      setDiagnosticMessage("Select and copy the report below.");
+    }
+  };
+
+  const changeMeasurementMode = async (value: string) => {
+    if (value !== "standard" && value !== "legacy" && value !== "realtime") return;
+    setRetrying(true);
+    setDiagnosticMessage("");
+    try {
+      await ringRef.current?.setHeartRateMode(value);
+      setMeasurementMode(value);
+    } catch (error) {
+      setDiagnosticMessage(error instanceof Error ? error.message : "Could not change measurement protocol.");
+    } finally {
+      setRetrying(false);
+    }
+  };
 
   const isConnected = mockMode || state === "connected";
   const isLoading = !mockMode && (state === "scanning" || state === "connecting");
   const displayName = mockMode ? `Mock_R02_P${personId}` : name;
+  const displayData = mockMode && mockData ? mockData : data;
+  const lastHeartRateAt = diagnostics?.lastHeartRateAt ?? 0;
+  const secondsSinceReading = lastHeartRateAt > 0
+    ? Math.max(0, Math.floor((now - lastHeartRateAt) / 1000))
+    : null;
+  const fresh = mockMode || (
+    isConnected && diagnostics?.measurementState === "measuring" &&
+    secondsSinceReading !== null && secondsSinceReading * 1000 < HR_STALE_MS
+  );
+  const waitingForContact = !mockMode && diagnostics?.measurementState === "waiting-for-contact";
+  const heartRate = isConnected && !waitingForContact ? displayData.heartRate : null;
 
   return (
     <Card
@@ -142,27 +211,50 @@ export default function RingCard({
         {/* Heart rate */}
         <div className="flex items-center gap-4 rounded-xl border border-border/60 bg-background px-4 py-3">
           <HeartPulse
-            className={`size-8 shrink-0 ${data.heartRate !== null ? "text-primary" : "text-muted-foreground/40"}`}
+            className={`size-8 shrink-0 ${heartRate !== null && fresh ? "text-primary" : "text-muted-foreground/40"}`}
             strokeWidth={1.75}
           />
           <div className="flex items-baseline gap-1.5">
             <span
               className={`font-display text-4xl font-bold tabular-nums ${
-                data.heartRate !== null ? "text-foreground" : "text-muted-foreground/40"
+                heartRate !== null && fresh ? "text-foreground" : "text-muted-foreground/40"
               }`}
             >
-              {data.heartRate !== null ? data.heartRate : "--"}
+              {heartRate ?? "--"}
             </span>
             <span className="text-sm font-medium text-muted-foreground">BPM</span>
           </div>
-          {data.batteryLevel !== null && (
+          {isConnected && displayData.batteryLevel !== null && (
             <span
-              className={`ml-auto text-xs ${data.batteryLevel < 20 ? "text-destructive" : "text-muted-foreground"}`}
+              className={`ml-auto text-xs ${displayData.batteryLevel < 20 ? "text-destructive" : "text-muted-foreground"}`}
             >
-              🔋 {data.batteryLevel}%{data.isCharging ? " ⚡" : ""}
+              🔋 {displayData.batteryLevel}%{displayData.isCharging ? " ⚡" : ""}
             </span>
           )}
         </div>
+
+        {!mockMode && isConnected && (
+          <div className="-mt-2 space-y-1 text-xs text-muted-foreground">
+            <p>
+              {waitingForContact
+                ? "Put the ring back on · measurements resume automatically"
+                : diagnostics?.measurementState === "error"
+                  ? "Measurement needs attention · see diagnostics below"
+                  : diagnostics?.measurementState === "warming-up" || secondsSinceReading === null
+                    ? "Warming up · keep the ring still against your skin"
+                    : fresh
+                      ? `Receiving · last measurement ${secondsSinceReading}s ago`
+                      : `Last reading · no new measurement for ${secondsSinceReading}s`}
+            </p>
+            <p className="tabular-nums" data-testid={`ring-${personId}-sample-count`}>
+              {diagnostics?.heartRateSamples ?? 0} real measurements received
+            </p>
+          </div>
+        )}
+
+        {!mockMode && diagnostics?.lastError && (
+          <p role="status" className="text-xs text-destructive">{diagnostics.lastError}</p>
+        )}
 
         <GenrePicker value={genre} onChange={onGenreChange} />
 
@@ -189,32 +281,56 @@ export default function RingCard({
             {isLoading ? "Searching..." : "Connect ring"}
           </Button>
         )}
+
+        {!mockMode && diagnostics && (
+          <details className="border-t border-border/60 pt-3 text-xs text-muted-foreground">
+            <summary className="cursor-pointer font-medium">Measurement diagnostics</summary>
+            <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 break-words">
+              <dt>Sensor state</dt><dd>{diagnostics.measurementState}</dd>
+              <dt>Firmware</dt><dd>{diagnostics.firmware ?? "Not reported"}</dd>
+              <dt>Hardware</dt><dd>{diagnostics.hardware ?? "Not reported"}</dd>
+              <dt>Bluetooth packets</dt><dd>{diagnostics.packetsReceived}</dd>
+              <dt>Start / continue</dt><dd>{diagnostics.startsSent} / {diagnostics.continuesSent}</dd>
+              <dt>Recovery attempts</dt><dd>{diagnostics.restartCount}</dd>
+            </dl>
+            <label className="mt-3 block space-y-1" htmlFor={`ring-${personId}-hr-mode`}>
+              <span>Measurement protocol</span>
+              <select
+                id={`ring-${personId}-hr-mode`}
+                className="w-full rounded border border-border bg-background px-2 py-1.5 text-foreground"
+                value={measurementMode}
+                disabled={retrying || !isConnected}
+                onChange={(event) => void changeMeasurementMode(event.target.value)}
+              >
+                <option value="standard">Standard</option>
+                <option value="legacy">Legacy R02 (compatibility test)</option>
+                <option value="realtime">Realtime HR (continuous)</option>
+              </select>
+            </label>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button variant="outline" size="sm" onClick={copyDiagnostics}>Copy diagnostics</Button>
+              <Button variant="ghost" size="sm" onClick={() => setDiagnosticReport(ringRef.current?.getDebugReport() ?? "")}>
+                Show report
+              </Button>
+              {isConnected && (
+                <Button variant="ghost" size="sm" onClick={handleRetry} disabled={retrying}>
+                  {retrying ? "Restarting..." : "Retry measurement"}
+                </Button>
+              )}
+            </div>
+            {diagnosticMessage && <p role="status" className="mt-2">{diagnosticMessage}</p>}
+            {diagnosticReport && (
+              <textarea
+                aria-label="Measurement diagnostic report"
+                readOnly
+                value={diagnosticReport}
+                onFocus={(event) => event.currentTarget.select()}
+                className="mt-2 h-32 w-full rounded border border-border bg-background p-2 font-mono text-xs"
+              />
+            )}
+          </details>
+        )}
       </CardContent>
     </Card>
-  );
-}
-
-function MetricBox({
-  icon,
-  label,
-  value,
-  unit,
-  color,
-}: {
-  icon: string;
-  label: string;
-  value: number | null;
-  unit: string;
-  color: string;
-}) {
-  return (
-    <div className="rounded-lg bg-background p-3 text-center">
-      <div className={`text-2xl font-bold tabular-nums ${color}`}>
-        {value !== null ? value : "--"}
-      </div>
-      <div className="text-xs text-muted-foreground mt-1">
-        {icon} {label} ({unit})
-      </div>
-    </div>
   );
 }

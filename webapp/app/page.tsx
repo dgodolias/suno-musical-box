@@ -9,15 +9,30 @@ import Image from "next/image";
 import FloatingIcons from "@/components/floating-icons";
 import ThemeToggle from "@/components/theme-toggle";
 import type { LiveHeartRates } from "@/components/waveform";
-import { type RingData, RingConnection } from "@/lib/ble/ring-manager";
-import {
-  type BiometricReading,
-
-  computeSnapshot,
-} from "@/lib/biometrics";
+import type { RingConnection, RingData } from "@/lib/ble/ring-manager";
+import type { BiometricReading } from "@/lib/biometrics";
+import { computeSnapshot } from "@/lib/biometrics";
 import { buildPrompt } from "@/lib/prompt-builder";
 
 const WINDOW_SEC = 30;
+const UPLOAD_INTERVAL_MS = 5000;
+const UPLOAD_RETRY_MS = 15000;
+const UPLOAD_BATCH_SIZE = 1000;
+const UPLOAD_TIMEOUT_MS = 15000;
+const SUNO_DISABLED = process.env.NEXT_PUBLIC_SUNO_DISABLED === "true";
+const SUNO_PAUSED_MESSAGE = "Music generation paused for ring tests";
+
+interface CollectionWindow {
+  sessionId: number;
+  startedAt: number;
+  endsAt: number;
+  collecting: boolean;
+}
+
+interface PendingReadings {
+  readings: BiometricReading[];
+  retryAfter: number;
+}
 
 interface Song {
   taskId: string;
@@ -76,6 +91,7 @@ export default function Home() {
   const [songCount, setSongCount] = useState(0);
   const [generationProgress, setGenerationProgress] = useState(0);
   const generatingRef = useRef(false);
+  const generationRunRef = useRef(0);
   const [ring1Connected, setRing1Connected] = useState(false);
   const [ring2Connected, setRing2Connected] = useState(false);
   const mockMode = useSyncExternalStore(noopSubscribe, readMockFlag, () => false);
@@ -87,35 +103,41 @@ export default function Home() {
   const ring1Ref = useRef<RingConnection | null>(null);
   const ring2Ref = useRef<RingConnection | null>(null);
   const readingsRef = useRef<BiometricReading[]>([]);
+  const collectionRef = useRef<CollectionWindow | null>(null);
+  const pendingReadingsRef = useRef(new Map<number, PendingReadings>());
+  const uploadingRef = useRef(false);
+  const startingSessionRef = useRef(false);
   // Latest heart rate per person; the session waveform reads it every frame
   const liveHrRef = useRef<LiveHeartRates>([null, null]);
   const collectIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const mockTickRef = useRef(0);
 
-  // When mock mode toggles, set both rings as connected/disconnected
-  useEffect(() => {
-    if (mockMode) {
-      setRing1Connected(true);
-      setRing2Connected(true);
-    } else {
-      setRing1Connected(false);
-      setRing2Connected(false);
-      setMockRing1Data(null);
-      setMockRing2Data(null);
-    }
-  }, [mockMode]);
+  const anyConnected = mockMode || ring1Connected || ring2Connected;
 
-  const anyConnected = ring1Connected || ring2Connected;
+  const recordReading = useCallback((reading: BiometricReading) => {
+    liveHrRef.current[reading.personId - 1] = reading.heartRate;
+    const collection = collectionRef.current;
+    if (
+      !collection?.collecting ||
+      reading.timestamp < collection.startedAt ||
+      reading.timestamp > collection.endsAt
+    ) return;
+
+    readingsRef.current.push(reading);
+    let pending = pendingReadingsRef.current.get(collection.sessionId);
+    if (!pending) {
+      pending = { readings: [], retryAfter: 0 };
+      pendingReadingsRef.current.set(collection.sessionId, pending);
+    }
+    pending.readings.push(reading);
+  }, []);
 
   const addReading = useCallback(
     (personId: 1 | 2, data: RingData) => {
-      // Always store readings (even before session starts)
-      // so we have data ready when generation triggers
-      if (data.heartRate === null) return; // skip empty readings
-      liveHrRef.current[personId - 1] = data.heartRate;
-      readingsRef.current.push({
+      if (data.heartRate === null) return;
+      recordReading({
         personId,
-        timestamp: Date.now(),
+        timestamp: data.lastUpdate,
         heartRate: data.heartRate,
         spo2: data.spo2,
         temperature: null,
@@ -125,12 +147,8 @@ export default function Home() {
         accelY: data.accelY,
         accelZ: data.accelZ,
       });
-      // Keep buffer bounded (last 300 readings)
-      if (readingsRef.current.length > 300) {
-        readingsRef.current = readingsRef.current.slice(-200);
-      }
     },
-    []
+    [recordReading]
   );
 
   const handleConnectionChange = useCallback((personId: 1 | 2, connected: boolean) => {
@@ -140,43 +158,57 @@ export default function Home() {
     if (!connected) liveHrRef.current[personId - 1] = null;
   }, []);
 
-  const sendReadingsToApi = useCallback(
-    async (readings: BiometricReading[]) => {
-      if (!sessionId || readings.length === 0) return;
-      try {
-        await fetch("/api/readings", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sessionId,
-            readings: readings.map((r) => ({
-              personId: r.personId,
-              heartRate: r.heartRate,
-              spo2: r.spo2,
-              temperature: r.temperature,
-              hrv: r.hrv,
-              rawPpg: r.rawPpg,
-              accelX: r.accelX,
-              accelY: r.accelY,
-              accelZ: r.accelZ,
-            })),
-          }),
-        });
-      } catch (err) {
-        console.error("Failed to send readings:", err);
+  const sendReadingsToApi = useCallback(async () => {
+    if (uploadingRef.current) return;
+    uploadingRef.current = true;
+    try {
+      for (const [pendingSessionId, pending] of pendingReadingsRef.current) {
+        if (pending.retryAfter > Date.now()) continue;
+        const batch = pending.readings.slice(0, UPLOAD_BATCH_SIZE);
+        if (batch.length === 0) continue;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), UPLOAD_TIMEOUT_MS);
+        try {
+          const response = await fetch("/api/readings", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sessionId: pendingSessionId, readings: batch }),
+            signal: controller.signal,
+          });
+          if (!response.ok) throw new Error(`Readings upload failed (${response.status})`);
+          pending.readings.splice(0, batch.length);
+          if (pending.readings.length === 0) pendingReadingsRef.current.delete(pendingSessionId);
+        } catch (err) {
+          pending.retryAfter = Date.now() + UPLOAD_RETRY_MS;
+          console.error("Failed to send readings:", err);
+        } finally {
+          clearTimeout(timeout);
+        }
       }
-    },
-    [sessionId]
-  );
+    } finally {
+      uploadingRef.current = false;
+    }
+  }, []);
+
+  // Retries also run after collection ends; failed observations keep their session.
+  useEffect(() => {
+    const timer = setInterval(() => void sendReadingsToApi(), UPLOAD_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [sendReadingsToApi]);
 
   const pollForSong = useCallback(
-    async (taskId: string, songNumber: number, prompt: string, style: string) => {
+    async (taskId: string, songNumber: number, prompt: string, style: string, generationRun: number) => {
+      if (SUNO_DISABLED || generationRunRef.current !== generationRun) return;
       setGenerationStatus("Generating music...");
       setGenerationProgress(0);
 
       // Progress animation: smooth to ~90% over 120s, then slow crawl
       const startTime = Date.now();
       const progressInterval = setInterval(() => {
+        if (generationRunRef.current !== generationRun) {
+          clearInterval(progressInterval);
+          return;
+        }
         const elapsed = (Date.now() - startTime) / 1000;
         let progress: number;
 
@@ -196,9 +228,27 @@ export default function Home() {
       // Poll Suno for actual completion
       for (let i = 0; i < 30; i++) {
         await new Promise((r) => setTimeout(r, 10000));
+        if (generationRunRef.current !== generationRun) {
+          clearInterval(progressInterval);
+          return;
+        }
         try {
           const res = await fetch(`/api/generate/${taskId}`);
+          if (res.status === 423) {
+            clearInterval(progressInterval);
+            if (generationRunRef.current === generationRun) {
+              generatingRef.current = false;
+              setGenerationProgress(0);
+              setGenerationStatus(SUNO_PAUSED_MESSAGE);
+              setIsActive(false);
+            }
+            return;
+          }
           const data = await res.json();
+          if (generationRunRef.current !== generationRun) {
+            clearInterval(progressInterval);
+            return;
+          }
 
           if (data.status === "ready" && data.audioUrl) {
             clearInterval(progressInterval);
@@ -219,11 +269,16 @@ export default function Home() {
             return;
           }
         } catch (err) {
+          if (generationRunRef.current !== generationRun) {
+            clearInterval(progressInterval);
+            return;
+          }
           console.error("Poll error:", err);
         }
       }
 
       clearInterval(progressInterval);
+      if (generationRunRef.current !== generationRun) return;
       setGenerationProgress(0);
       setGenerationStatus("Generation timed out");
     },
@@ -231,20 +286,29 @@ export default function Home() {
   );
 
   const generateSong = useCallback(async () => {
+    if (SUNO_DISABLED) {
+      generatingRef.current = false;
+      setGenerationProgress(0);
+      setGenerationStatus(SUNO_PAUSED_MESSAGE);
+      setIsActive(false);
+      return;
+    }
     // Prevent double generation
     if (generatingRef.current) return;
     generatingRef.current = true;
+    const generationRun = generationRunRef.current;
 
-    const readings = readingsRef.current;
-    let p1 = readings.filter((r) => r.personId === 1);
-    let p2 = readings.filter((r) => r.personId === 2);
-
-    // If only 1 ring connected, duplicate its data for both persons
-    if (p1.length < 5 && p2.length >= 5) p1 = p2;
-    if (p2.length < 5 && p1.length >= 5) p2 = p1;
+    const collection = collectionRef.current;
+    const readings = readingsRef.current.filter((reading) =>
+      collection &&
+      reading.timestamp >= collection.startedAt &&
+      reading.timestamp <= collection.endsAt
+    );
+    const p1 = readings.filter((r) => r.personId === 1);
+    const p2 = readings.filter((r) => r.personId === 2);
 
     // Ring data is only logged; the song comes from the genres alone
-    const snap = p1.length >= 5 ? computeSnapshot(p1, p2) : null;
+    const snap = p1.length >= 5 && p2.length >= 5 ? computeSnapshot(p1, p2) : null;
 
     const { prompt, style } = buildPrompt(genre1, genre2);
     setGenerationStatus("Submitting to Suno...");
@@ -255,47 +319,77 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sessionId, prompt, style, snapshot: snap }),
       });
+      if (res.status === 423) {
+        if (generationRunRef.current === generationRun) {
+          generatingRef.current = false;
+          setGenerationProgress(0);
+          setGenerationStatus(SUNO_PAUSED_MESSAGE);
+          setIsActive(false);
+        }
+        return;
+      }
       const data = await res.json();
+      if (generationRunRef.current !== generationRun) return;
 
       if (data.taskId) {
         const num = songCount + 1;
         setSongCount(num);
-        pollForSong(data.taskId, num, prompt, style);
+        void pollForSong(data.taskId, num, prompt, style, generationRun);
       } else {
         setGenerationStatus("Suno error: " + JSON.stringify(data));
       }
     } catch (err) {
+      if (generationRunRef.current !== generationRun) return;
       setGenerationStatus("API error: " + String(err));
     }
   }, [sessionId, songCount, pollForSong, genre1, genre2]);
 
   const startSession = useCallback(async () => {
+    if (startingSessionRef.current) return;
+    startingSessionRef.current = true;
     try {
       const res = await fetch("/api/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ notes: mockMode ? "Mock web session" : "Web session" }),
       });
+      if (!res.ok) throw new Error(`Session creation failed (${res.status})`);
       const data = await res.json();
+      if (!Number.isSafeInteger(data.sessionId) || data.sessionId <= 0) {
+        throw new Error("Invalid session ID");
+      }
+      generationRunRef.current += 1;
+      const startedAt = Date.now();
+      collectionRef.current = {
+        sessionId: data.sessionId,
+        startedAt,
+        endsAt: startedAt + WINDOW_SEC * 1000,
+        collecting: true,
+      };
+      readingsRef.current = [];
       setSessionId(data.sessionId);
       setIsActive(true);
       setCollectSeconds(0);
       generatingRef.current = false;
       mockTickRef.current = 0;
-      // DON'T clear readings — rings are already streaming data
-      // DON'T re-send beginMeasurement — causes warmup delay with zeros
+      // BLE stays streaming; only the session's observation window resets.
       setGenerationStatus("Collecting biometric data...");
     } catch (err) {
       console.error("Failed to start session:", err);
+    } finally {
+      startingSessionRef.current = false;
     }
   }, [mockMode]);
 
   const stopSession = useCallback(async () => {
+    const stoppedRun = ++generationRunRef.current;
+    if (collectionRef.current) collectionRef.current.collecting = false;
     setIsActive(false);
     if (collectIntervalRef.current) {
       clearInterval(collectIntervalRef.current);
       collectIntervalRef.current = null;
     }
+    await sendReadingsToApi();
     if (sessionId) {
       await fetch("/api/sessions", {
         method: "POST",
@@ -303,12 +397,12 @@ export default function Home() {
         body: JSON.stringify({ action: "end", sessionId }),
       });
     }
-    setGenerationStatus("");
-  }, [sessionId]);
+    if (generationRunRef.current === stoppedRun) setGenerationStatus("");
+  }, [sessionId, sendReadingsToApi]);
 
   // Collection tick (1Hz)
   useEffect(() => {
-    if (!isActive) return;
+    if (!isActive || !collectionRef.current?.collecting) return;
 
     collectIntervalRef.current = setInterval(() => {
       mockTickRef.current += 1;
@@ -318,8 +412,8 @@ export default function Home() {
       if (mockMode) {
         const r1 = generateMockReading(1, t);
         const r2 = generateMockReading(2, t);
-        readingsRef.current.push(r1, r2);
-        liveHrRef.current = [r1.heartRate, r2.heartRate];
+        recordReading(r1);
+        recordReading(r2);
 
         setMockRing1Data({
           heartRate: r1.heartRate,
@@ -330,7 +424,7 @@ export default function Home() {
           rawPpg: r1.rawPpg,
           batteryLevel: 85,
           isCharging: false,
-          lastUpdate: Date.now(),
+          lastUpdate: r1.timestamp,
         });
         setMockRing2Data({
           heartRate: r2.heartRate,
@@ -341,33 +435,28 @@ export default function Home() {
           rawPpg: r2.rawPpg,
           batteryLevel: 72,
           isCharging: false,
-          lastUpdate: Date.now(),
+          lastUpdate: r2.timestamp,
         });
       }
 
       // Skip if already generating
       if (generatingRef.current) return;
 
-      setCollectSeconds((s) => {
-        const next = s + 1;
+      const collection = collectionRef.current;
+      if (!collection?.collecting) return;
+      const elapsed = Math.floor((Date.now() - collection.startedAt) / 1000);
+      setCollectSeconds(Math.min(elapsed, WINDOW_SEC));
 
-        // Send batch to API every 5 seconds
-        if (next % 5 === 0) {
-          const batch = readingsRef.current.slice(-10);
-          sendReadingsToApi(batch);
+      // Keep network effects outside React state updaters (which may be replayed).
+      if (Date.now() >= collection.endsAt) {
+        collection.collecting = false;
+        if (collectIntervalRef.current) {
+          clearInterval(collectIntervalRef.current);
+          collectIntervalRef.current = null;
         }
-
-        // After the window, always generate — with or without ring data
-        if (next === WINDOW_SEC) {
-          if (collectIntervalRef.current) {
-            clearInterval(collectIntervalRef.current);
-            collectIntervalRef.current = null;
-          }
-          generateSong();
-        }
-
-        return next;
-      });
+        void sendReadingsToApi();
+        void generateSong();
+      }
     }, 1000);
 
     return () => {
@@ -375,7 +464,7 @@ export default function Home() {
         clearInterval(collectIntervalRef.current);
       }
     };
-  }, [isActive, mockMode, sendReadingsToApi, generateSong]);
+  }, [isActive, mockMode, sendReadingsToApi, generateSong, recordReading]);
 
   return (
     <div className="relative min-h-screen bg-background text-foreground">
@@ -420,6 +509,12 @@ export default function Home() {
             )}
           </div>
         </div>
+
+        {SUNO_DISABLED && (
+          <div role="status" className="rounded-xl border border-primary/30 bg-primary/10 px-4 py-3 text-sm font-medium">
+            {SUNO_PAUSED_MESSAGE}
+          </div>
+        )}
 
         {/* Ring cards */}
         <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">

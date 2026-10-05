@@ -1,20 +1,16 @@
-/**
- * Colmi R02 BLE protocol — encode/decode 16-byte packets.
- *
- * Service UUID: 6e40fff0-b5a3-f393-e0a9-e50e24dcca9e
- * TX (notify):  6e400003-b5a3-f393-e0a9-e50e24dcca9e
- * RX (write):   6e400002-b5a3-f393-e0a9-e50e24dcca9e
- */
-
+/** COLMI UART commands. Reference: https://colmi.puxtril.com/commands/#data-request */
 export const COLMI_SERVICE_UUID = "6e40fff0-b5a3-f393-e0a9-e50e24dcca9e";
 export const COLMI_TX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
 export const COLMI_RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 
-// Command 0x03 = battery level
-const CMD_BATTERY = 0x03;
+export type HeartRateMode = "standard" | "legacy" | "realtime";
 
-// Command 0x69 = real-time data request
+const PACKET_LENGTH = 16;
+const CMD_BATTERY = 0x03;
 const CMD_REAL_TIME = 0x69;
+const CMD_REAL_TIME_HEART_RATE = 0x1e;
+const CMD_STOP_REAL_TIME = 0x6a;
+const CMD_RAW_SENSOR = 0xa1;
 
 export enum RealTimeType {
   HEART_RATE = 1,
@@ -22,16 +18,8 @@ export enum RealTimeType {
   SPO2 = 3,
   FATIGUE = 4,
   STRESS = 5,
+  REAL_TIME_HEART_RATE = 6,
 }
-
-// Command 0x1e (30) = real-time HR continue/keep-alive
-const CMD_RT_HEART_RATE = 0x1e;
-
-// Command 0x6a (106) = stop real-time
-const CMD_STOP_REAL_TIME = 0x6a;
-
-// Command 0xA1 = raw sensor streaming
-const CMD_RAW_SENSOR = 0xa1;
 
 export enum RawSensorType {
   SPO2_RAW = 1,
@@ -39,64 +27,50 @@ export enum RawSensorType {
   ACCELEROMETER = 3,
 }
 
-function checksum(packet: Uint8Array): number {
-  let sum = 0;
-  for (let i = 0; i < 15; i++) sum += packet[i];
-  return sum & 0xFF;
+function packet(...values: number[]): ArrayBuffer {
+  const bytes = new Uint8Array(PACKET_LENGTH);
+  bytes.set(values);
+  bytes[15] = bytes.slice(0, 15).reduce((sum, value) => sum + value, 0) & 0xff;
+  return bytes.buffer;
 }
 
 export function buildBatteryCommand(): ArrayBuffer {
-  const cmd = new Uint8Array(16);
-  cmd[0] = CMD_BATTERY;
-  cmd[15] = checksum(cmd);
-  return cmd.buffer as ArrayBuffer;
+  return packet(CMD_BATTERY);
 }
 
-export function buildRealTimeCommand(
-  type: RealTimeType,
-  start: boolean
-): ArrayBuffer {
-  const cmd = new Uint8Array(16);
-  cmd[0] = CMD_REAL_TIME;
-  cmd[1] = type;
-  cmd[2] = start ? 1 : 0;
-  cmd[15] = checksum(cmd);
-  return cmd.buffer as ArrayBuffer;
+export function buildRealTimeCommand(type: RealTimeType, start: boolean): ArrayBuffer {
+  return start ? packet(CMD_REAL_TIME, type, 1) : buildStopCommand(type);
+}
+
+export function buildHeartRateStartCommand(mode: HeartRateMode): ArrayBuffer {
+  // Gadgetbridge's manual-HR request uses a zero-padded 69 01 packet.
+  // Keep this explicit: action 0 here is a legacy START, never our STOP API.
+  const type = mode === "realtime" ? RealTimeType.REAL_TIME_HEART_RATE : RealTimeType.HEART_RATE;
+  return packet(CMD_REAL_TIME, type, mode === "legacy" ? 0 : 1);
 }
 
 export function buildContinueHRCommand(): ArrayBuffer {
-  // Same command 0x69, type=HR(1), action=CONTINUE(3)
-  // Confirmed by RingCLI source: COMMAND_START_REAL_TIME with ACTION_CONTINUE
-  const cmd = new Uint8Array(16);
-  cmd[0] = CMD_REAL_TIME;
-  cmd[1] = RealTimeType.HEART_RATE;
-  cmd[2] = 3; // Action: CONTINUE
-  cmd[15] = checksum(cmd);
-  return cmd.buffer as ArrayBuffer;
+  // RingCLI uses START_REAL_TIME with action CONTINUE (3), not a new START.
+  return packet(CMD_REAL_TIME, RealTimeType.HEART_RATE, 3);
 }
 
 export function buildStopCommand(type: RealTimeType): ArrayBuffer {
-  const cmd = new Uint8Array(16);
-  cmd[0] = CMD_STOP_REAL_TIME;
-  cmd[1] = type;
-  cmd[15] = checksum(cmd);
-  return cmd.buffer as ArrayBuffer;
+  return packet(CMD_STOP_REAL_TIME, type);
 }
 
-export function buildRawSensorCommand(
-  type: RawSensorType,
-  start: boolean
-): ArrayBuffer {
-  const cmd = new Uint8Array(16);
-  cmd[0] = CMD_RAW_SENSOR;
-  cmd[1] = start ? 0x04 : 0x02;
-  cmd[15] = checksum(cmd);
-  return cmd.buffer as ArrayBuffer;
+export function buildRawSensorCommand(type: RawSensorType, start: boolean): ArrayBuffer {
+  // Legacy API: this switch is global on the supported firmware, not per sensor.
+  // Raw mode is deliberately not enabled by the acquisition manager.
+  void type;
+  return packet(CMD_RAW_SENSOR, start ? 0x04 : 0x02);
 }
 
 export interface ParsedReading {
   command: number;
   type: number;
+  status?: "reading" | "warming-up" | "error" | "invalid" | "ack";
+  errorCode?: number;
+  error?: string;
   heartRate?: number;
   spo2?: number;
   batteryLevel?: number;
@@ -108,57 +82,70 @@ export interface ParsedReading {
 }
 
 export function parseNotification(data: DataView): ParsedReading | null {
-  if (data.byteLength < 4) return null;
-
+  if (data.byteLength < 2) return null;
   const command = data.getUint8(0);
   const type = data.getUint8(1);
 
-  // CMD 0x03 — battery level response
-  if (command === CMD_BATTERY) {
-    const level = data.getUint8(1);
-    const charging = data.getUint8(2) === 1;
-    return { command, type: 0, batteryLevel: level, isCharging: charging };
+  // These command responses have the documented fixed 16-byte framing.
+  // Raw sensor framing varies by firmware and is not subject to this check.
+  if ([CMD_BATTERY, CMD_REAL_TIME, CMD_REAL_TIME_HEART_RATE, CMD_STOP_REAL_TIME].includes(command)) {
+    if (data.byteLength !== PACKET_LENGTH) {
+      return { command, type, status: "invalid", error: `Expected 16 bytes, received ${data.byteLength}` };
+    }
+    let sum = 0;
+    for (let index = 0; index < 15; index++) sum += data.getUint8(index);
+    if ((sum & 0xff) !== data.getUint8(15)) {
+      return { command, type, status: "invalid", error: "Invalid packet checksum" };
+    }
   }
 
-  // CMD 105 (0x69) — real-time response (START and CONTINUE both respond with 0x69)
+  if (command === CMD_BATTERY) {
+    if (type > 100) return { command, type, status: "invalid", error: "Invalid battery level" };
+    return { command, type: 0, status: "reading", batteryLevel: type, isCharging: data.getUint8(2) === 1 };
+  }
+
+  if (command === CMD_STOP_REAL_TIME) return { command, type, status: "ack" };
+
+  // https://colmi.puxtril.com/commands/#realtime-heart-rate specifies opcode
+  // 0x1e and HR at byte 1. Some firmware instead replies with 0x69/type 6.
+  if (command === CMD_REAL_TIME_HEART_RATE) {
+    return type === 0
+      ? { command, type: RealTimeType.REAL_TIME_HEART_RATE, status: "warming-up" }
+      : { command, type: RealTimeType.REAL_TIME_HEART_RATE, status: "reading", heartRate: type };
+  }
+
   if (command === CMD_REAL_TIME) {
-    const readingType = data.getUint8(1);
     const errorCode = data.getUint8(2);
     const value = data.getUint8(3);
-
-    if (errorCode !== 0) return null;
-
-    if (readingType === RealTimeType.HEART_RATE && value >= 40 && value <= 200) {
-      return { command, type: readingType, heartRate: value };
+    if (errorCode !== 0) {
+      // Firmware error-code meanings are undocumented; preserve the actual code.
+      return { command, type, status: "error", errorCode, error: `Ring measurement error 0x${errorCode.toString(16).padStart(2, "0")}` };
     }
-    if (readingType === RealTimeType.SPO2 && value >= 70 && value <= 100) {
-      return { command, type: readingType, spo2: value };
+    if (value === 0) return { command, type, status: "warming-up" };
+    if (type === RealTimeType.HEART_RATE || type === RealTimeType.REAL_TIME_HEART_RATE) {
+      // Type 6 shares the generic 0x69 value layout in the captured R02_V3.0
+      // and RT02R_V3.1 traces. Keep the device's nonzero byte value.
+      return { command, type, status: "reading", heartRate: value };
     }
-
-    // value=0 means sensor still calibrating — extract raw PPG from bytes[6-7] if available
-    if (value === 0 && data.byteLength >= 8) {
-      const rawPpg = data.getUint16(6, true);
-      if (rawPpg > 0) {
-        return { command, type: readingType, rawPpg };
-      }
+    if (type === RealTimeType.SPO2 && value <= 100) {
+      return { command, type, status: "reading", spo2: value };
     }
+    return { command, type, status: "ack" };
   }
 
+  // Preserve the existing raw decoder; it is not requested automatically.
   if (command === CMD_RAW_SENSOR) {
-    const subtype = data.getUint8(1);
-
-    if (subtype === RawSensorType.ACCELEROMETER && data.byteLength >= 8) {
-      const x = data.getInt16(2, true) / 1000;
-      const y = data.getInt16(4, true) / 1000;
-      const z = data.getInt16(6, true) / 1000;
-      return { command, type: subtype, accelX: x, accelY: y, accelZ: z };
+    if (type === RawSensorType.ACCELEROMETER && data.byteLength >= 8) {
+      return {
+        command, type,
+        accelX: data.getInt16(2, true) / 1000,
+        accelY: data.getInt16(4, true) / 1000,
+        accelZ: data.getInt16(6, true) / 1000,
+      };
     }
-
-    if (subtype === RawSensorType.PPG_RAW && data.byteLength >= 4) {
-      const ppg = data.getUint16(2, true);
-      return { command, type: subtype, rawPpg: ppg };
+    if (type === RawSensorType.PPG_RAW && data.byteLength >= 4) {
+      return { command, type, rawPpg: data.getUint16(2, true) };
     }
   }
-
   return null;
 }

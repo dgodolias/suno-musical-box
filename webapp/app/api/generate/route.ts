@@ -5,6 +5,9 @@ import { insertSong } from "@/lib/db";
 const SONG_DURATION_SEC = 60;
 
 export async function POST(request: Request) {
+  if (process.env.SUNO_DISABLED === "true") {
+    return NextResponse.json({ error: "Music generation paused for ring tests" }, { status: 423 });
+  }
   const body = await request.json();
   const { sessionId, prompt, style, snapshot } = body;
 

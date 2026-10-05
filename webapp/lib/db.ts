@@ -19,6 +19,7 @@ export async function endSession(sessionId: number): Promise<void> {
 
 export interface ReadingInput {
   personId: number;
+  timestamp: number;
   heartRate: number | null;
   spo2: number | null;
   temperature: number | null;
@@ -34,14 +35,14 @@ export async function insertReadings(
   readings: ReadingInput[]
 ): Promise<number> {
   const sql = getDb();
-  for (const r of readings) {
-    await sql`
+  if (readings.length === 0) return 0;
+  // A failed batch must not leave a partially inserted prefix before a retry.
+  await sql.transaction(readings.map((r) => sql`
       INSERT INTO biometric_readings
-        (session_id, person_id, heart_rate, spo2, temperature, hrv, raw_ppg, accel_x, accel_y, accel_z)
+        (session_id, person_id, timestamp, heart_rate, spo2, temperature, hrv, raw_ppg, accel_x, accel_y, accel_z)
       VALUES
-        (${sessionId}, ${r.personId}, ${r.heartRate}, ${r.spo2}, ${r.temperature}, ${r.hrv}, ${r.rawPpg}, ${r.accelX}, ${r.accelY}, ${r.accelZ})
-    `;
-  }
+        (${sessionId}, ${r.personId}, ${new Date(r.timestamp).toISOString()}, ${r.heartRate}, ${r.spo2}, ${r.temperature}, ${r.hrv}, ${r.rawPpg}, ${r.accelX}, ${r.accelY}, ${r.accelZ})
+    `));
   return readings.length;
 }
 

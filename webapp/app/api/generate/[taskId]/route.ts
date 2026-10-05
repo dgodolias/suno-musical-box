@@ -5,6 +5,9 @@ export async function GET(
   request: Request,
   { params }: { params: Promise<{ taskId: string }> }
 ) {
+  if (process.env.SUNO_DISABLED === "true") {
+    return NextResponse.json({ error: "Music generation paused for ring tests" }, { status: 423 });
+  }
   const { taskId } = await params;
   const apiKey = process.env.SUNO_API_KEY;
 
