@@ -134,7 +134,7 @@ interface Trace {
 // packs its lobes tighter and swings wider. As the two heart rates converge,
 // the ribbons fall into step, close in on each other and turn pink, until
 // they move as one.
-export default function Waveform({ ratesRef }: { ratesRef: RefObject<LiveHeartRates> }) {
+export default function WaveformV1({ ratesRef }: { ratesRef: RefObject<LiveHeartRates> }) {
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 

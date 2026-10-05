@@ -1,13 +1,19 @@
 "use client";
 
 import { useEffect, useRef, useState, type RefObject } from "react";
-import Waveform from "@/components/waveform";
+import WaveformV1 from "@/components/waveform-v1";
+import WaveformV2 from "@/components/waveform-v2";
 import type { Replay } from "@/lib/db";
 import {
   HEART_RATE_CHANNEL,
   type HeartRateMessage,
   type LiveHeartRates,
 } from "@/lib/heart-rate-channel";
+
+// The two designs: v1 draws a ribbon of strands per ring, v2 one wave per ring
+// mirrored around a shared axis
+const WAVES = { v1: WaveformV1, v2: WaveformV2 };
+export type SyncWaveVersion = keyof typeof WAVES;
 
 // Plays a recorded session back in real time, on a loop
 function startReplay(replay: Replay, ratesRef: RefObject<LiveHeartRates>) {
@@ -33,7 +39,8 @@ function startReplay(replay: Replay, ratesRef: RefObject<LiveHeartRates>) {
 // Full-screen display for a TV: only the waves, fed by the Musical Box page
 // open in another window of the same browser. Double-click for full screen.
 // With `replay` (dev preview) it plays a recorded session instead.
-export default function SyncWave({ replay }: { replay?: Replay | null }) {
+export default function SyncWave({ version, replay }: { version: SyncWaveVersion; replay?: Replay | null }) {
+  const Waveform = WAVES[version];
   const ratesRef = useRef<LiveHeartRates>([null, null]);
   const [unlinked, setUnlinked] = useState(false);
 
