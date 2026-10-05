@@ -8,8 +8,10 @@ import MusicPlayer from "@/components/music-player";
 import Image from "next/image";
 import FloatingIcons from "@/components/floating-icons";
 import ThemeToggle from "@/components/theme-toggle";
-import type { LiveHeartRates } from "@/components/waveform";
+import { Tv } from "lucide-react";
 import type { RingConnection, RingData } from "@/lib/ble/ring-manager";
+import { HEART_RATE_CHANNEL } from "@/lib/heart-rate-channel";
+import type { HeartRateMessage, LiveHeartRates } from "@/lib/heart-rate-channel";
 import type { BiometricReading } from "@/lib/biometrics";
 import { computeSnapshot } from "@/lib/biometrics";
 import { buildPrompt } from "@/lib/prompt-builder";
@@ -99,8 +101,27 @@ export default function Home() {
   const generatingRef = useRef(false);
   const generationRunRef = useRef(0);
   const liveHrRef = useRef<LiveHeartRates>([null, null]);
+  const channelRef = useRef<BroadcastChannel | null>(null);
   const mockTickRef = useRef(0);
   const anyConnected = mockMode || ring1Connected || ring2Connected;
+
+  // Live heart rates for the SyncWave display (/syncwave) in another window
+  const publishRates = useCallback(() => {
+    channelRef.current?.postMessage({ type: "rates", rates: liveHrRef.current } satisfies HeartRateMessage);
+  }, []);
+
+  useEffect(() => {
+    const channel = new BroadcastChannel(HEART_RATE_CHANNEL);
+    channelRef.current = channel;
+    channel.onmessage = (event: MessageEvent<HeartRateMessage>) => {
+      if (event.data.type === "hello") publishRates();
+    };
+    publishRates();
+    return () => {
+      channel.close();
+      channelRef.current = null;
+    };
+  }, [publishRates]);
 
   useEffect(() => {
     const outbox = outboxRef.current ?? new RecordingOutbox();
@@ -156,7 +177,10 @@ export default function Home() {
   }, []);
 
   const recordReading = useCallback((reading: BiometricReading) => {
-    liveHrRef.current[reading.personId - 1] = reading.heartRate;
+    liveHrRef.current[reading.personId - 1] = reading.heartRate === null
+      ? null
+      : { bpm: reading.heartRate, at: reading.timestamp };
+    publishRates();
     const session = activeSessionRef.current;
     if (!session) {
       const starting = startingReadingsRef.current;
@@ -168,7 +192,7 @@ export default function Home() {
     if (session.endedAt !== null || reading.timestamp < session.startedAt) return;
     void outboxRef.current?.append(session.clientSessionId, { ...reading, sampleId: crypto.randomUUID() })
       .catch((error) => setSessionError("Could not retain measurement: " + String(error)));
-  }, []);
+  }, [publishRates]);
 
   const addReading = useCallback((personId: 1 | 2, data: RingData) => {
     if (data.heartRate === null) return;
@@ -182,8 +206,11 @@ export default function Home() {
   const handleConnectionChange = useCallback((personId: 1 | 2, connected: boolean) => {
     if (personId === 1) setRing1Connected(connected);
     else setRing2Connected(connected);
-    if (!connected) liveHrRef.current[personId - 1] = null;
-  }, []);
+    if (!connected) {
+      liveHrRef.current[personId - 1] = null;
+      publishRates();
+    }
+  }, [publishRates]);
 
   const finishSession = useCallback(async () => {
     const session = activeSessionRef.current;
@@ -396,7 +423,20 @@ export default function Home() {
               Edu<span className="text-primary">Coach</span>
             </span>
           </div>
-          <ThemeToggle />
+          <div className="flex items-center gap-2">
+            {/* Opens its own window, ready to drag onto a TV */}
+            <Button
+              variant="outline"
+              onClick={() => window.open("/syncwave", "syncwave", "popup,width=1280,height=720")}
+              className="h-10 rounded-full border-border/60 bg-card px-3.5"
+              aria-label="Open SyncWave"
+              title="Open the SyncWave display in its own window"
+            >
+              <Tv />
+              <span className="hidden sm:inline">SyncWave</span>
+            </Button>
+            <ThemeToggle />
+          </div>
         </div>
 
         {/* Header */}
@@ -477,7 +517,6 @@ export default function Home() {
           collectSeconds={Math.min(elapsedSeconds, WINDOW_SEC)}
           windowSeconds={WINDOW_SEC}
           status={generationStatus || (isActive ? "Recording..." : "")}
-          heartRatesRef={liveHrRef}
         />
 
         {/* Music player */}

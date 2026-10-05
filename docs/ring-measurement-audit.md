@@ -2,6 +2,8 @@
 
 Date: 2026-10-05. Scope: maintain live HR measurements and make their freshness observable. The animated waveform stays unchanged; it is not a raw physiological trace.
 
+> Later on 2026-10-05, at the user's request, that waveform was replaced: the session panel no longer shows one, and the `/syncwave` page draws two ribbons from each ring's latest BPM. The statements below about the wave describe the state at the time of this audit.
+
 **User constraint: never flash, update, or replace either ring's firmware.** No firmware flash, OTA, or update has been attempted. Work is limited to the browser application and measurement commands.
 
 **Local test pause:** Suno calls are disabled and must remain disabled until the user explicitly requests resumption. The ignored `.env.local` contains `SUNO_DISABLED=true` and `NEXT_PUBLIC_SUNO_DISABLED=true`; no other secrets were changed. Server guards reject generation and status polling with HTTP 423 before body/parameter processing, network calls, or database access. The UI shows the pause and Start collects ring data only. Live localhost checks confirmed that both `POST /api/generate` with `{}` and `GET /api/generate/ring-test-gate` return 423 with `Music generation paused for ring tests`.

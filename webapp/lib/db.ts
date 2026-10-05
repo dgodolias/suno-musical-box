@@ -75,6 +75,45 @@ export async function insertReadings(
   return { count: acknowledgedSampleIds.length, acknowledgedSampleIds };
 }
 
+export interface ReplayReading {
+  personId: 1 | 2;
+  offsetMs: number; // since the session's first heart-rate reading
+  heartRate: number;
+}
+
+export interface Replay {
+  sessionId: number;
+  readings: ReplayReading[];
+}
+
+/** A recorded session's heart rates, for replaying on the SyncWave display.
+ * Without an ID, the latest session in which both people were measured. */
+export async function getReplay(sessionId?: number): Promise<Replay | null> {
+  const sql = getDb();
+  const id: number | undefined = sessionId ?? (await sql`
+    SELECT session_id FROM biometric_readings
+    WHERE heart_rate IS NOT NULL
+    GROUP BY session_id
+    ORDER BY count(DISTINCT person_id) DESC, session_id DESC
+    LIMIT 1
+  `)[0]?.session_id;
+  if (id === undefined) return null;
+  const rows = await sql`
+    SELECT person_id, heart_rate,
+      round(extract(epoch FROM timestamp - min(timestamp) OVER ()) * 1000) AS offset_ms
+    FROM biometric_readings
+    WHERE session_id = ${id} AND heart_rate IS NOT NULL
+    ORDER BY timestamp
+  `;
+  if (rows.length === 0) return null;
+  return {
+    sessionId: id,
+    readings: rows.map((row) => ({
+      personId: row.person_id, offsetMs: Number(row.offset_ms), heartRate: row.heart_rate,
+    })),
+  };
+}
+
 export interface SongInput {
   sessionId: number;
   prompt: string;

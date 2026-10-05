@@ -102,6 +102,14 @@ function pageHarness({ sunoDisabled = false, storage = new MemoryStorage(), tabS
     useSyncExternalStore() { hookIndex++; return false; },
   };
   class Clock extends Date { static now() { return now; } }
+  // The SyncWave display's side of the channel: what the page broadcast
+  const broadcasts = [];
+  const channels = new Set();
+  class TestChannel {
+    constructor() { this.onmessage = null; channels.add(this); }
+    postMessage(message) { broadcasts.push(structuredClone(message)); }
+    close() { channels.delete(this); }
+  }
   const jsx = (type, props, key) => ({ type, props: { ...props, key } });
   const uuid = require("node:crypto").randomUUID;
   const biometrics = loadModule("lib/biometrics.ts");
@@ -115,6 +123,8 @@ function pageHarness({ sunoDisabled = false, storage = new MemoryStorage(), tabS
     "next/image": { default: "Image" },
     "@/components/floating-icons": { default: "FloatingIcons" },
     "@/components/theme-toggle": { default: "ThemeToggle" },
+    "lucide-react": { Tv: "Tv" },
+    "@/lib/heart-rate-channel": loadModule("lib/heart-rate-channel.ts"),
     "@/lib/biometrics": biometrics,
     "@/lib/prompt-builder": { buildPrompt: () => ({ prompt: "genres", style: "genres" }) },
   };
@@ -125,6 +135,7 @@ function pageHarness({ sunoDisabled = false, storage = new MemoryStorage(), tabS
       removeEventListener: (name) => windowListeners.delete(name),
     },
     crypto: { randomUUID: uuid },
+    BroadcastChannel: TestChannel,
     sessionStorage: { getItem: (key) => tabStorage.get(key) ?? null, setItem: (key, value) => tabStorage.set(key, value), removeItem: (key) => tabStorage.delete(key) },
     process: { env: { NEXT_PUBLIC_SUNO_DISABLED: String(sunoDisabled), NODE_ENV: "test" } },
     AbortController,
@@ -190,7 +201,8 @@ function pageHarness({ sunoDisabled = false, storage = new MemoryStorage(), tabS
   }
   render();
   return {
-    requests, uploadResponses, generationResponses, pollResponses, storage, tabStorage,
+    requests, uploadResponses, generationResponses, pollResponses, storage, tabStorage, broadcasts,
+    hello() { for (const channel of channels) channel.onmessage?.({ data: { type: "hello" } }); },
     flush: () => outboxes[0].flush(),
     unload() {
       const event = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
@@ -515,4 +527,22 @@ test("fresh callbacks during slow local session creation are retained from Start
   assert.equal(samples.length, 2);
   assert.equal(samples[0].timestamp, startedAt + 1000);
   assert.equal([...page.storage.sessions.values()][0].startedAt, startedAt);
+});
+
+test("live heart rates reach the SyncWave display, which can ask for them", async () => {
+  const page = pageHarness();
+  await page.settle();
+  assert.deepEqual(page.broadcasts.at(-1), { type: "rates", rates: [null, null] });
+  page.reading(1, 72);
+  page.reading(2, 81, page.now - 500);
+  assert.deepEqual(page.broadcasts.at(-1), {
+    type: "rates", rates: [{ bpm: 72, at: page.now }, { bpm: 81, at: page.now - 500 }],
+  });
+  const sent = page.broadcasts.length;
+  page.hello();
+  assert.equal(page.broadcasts.length, sent + 1);
+  assert.deepEqual(page.broadcasts.at(-1).rates.map((rate) => rate?.bpm), [72, 81]);
+  page.ring(2).onConnectionChange(2, false);
+  assert.deepEqual(page.broadcasts.at(-1).rates.map((rate) => rate?.bpm ?? null), [72, null]);
+  page.unmount();
 });
