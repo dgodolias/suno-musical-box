@@ -283,12 +283,12 @@ export default function RingCard({
             <p>
               {opticalActive
                 ? diagnostics?.opticalState === "stopping"
-                  ? "Optical test · checking that the sensor stopped"
+                  ? "Optical test · checking for trailing packets"
                   : "Optical test · heart-rate recording paused"
                 : measurementPaused
                   ? "Measurement paused · choose Retry measurement to resume"
                   : waitingForContact
-                    ? "Put the ring back on · measurements resume automatically"
+                    ? passiveObservation ? "No valid reading · observing without retries" : "Put the ring back on · retrying measurement automatically"
                     : diagnostics?.measurementState === "error"
                       ? "Measurement needs attention · see diagnostics below"
                       : diagnostics?.measurementState === "warming-up" || secondsSinceReading === null
