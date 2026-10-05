@@ -8,7 +8,7 @@ Date: 2026-10-05. Scope: maintain live HR measurements and make their freshness 
 
 ## Findings and selected correction
 
-**Latest physical evidence:** after correcting the `0x69/type6` parser and automatically selecting Realtime 6 for the two exact tested profiles, both rings streamed sensor-reported BPM together for more than three minutes, at roughly one frame per second. The user confirmed both worked. Automatic retry after measurement errors also resumed after refitting, but a separate confirmed table test produced false-positive BPM. Continuous acquisition is demonstrated; reliable wear detection is not. This is realtime HR, not PhoneSport. Further session-storage work is pending and this audit does not declare the whole project complete.
+**Latest physical evidence:** after correcting the `0x69/type6` parser and automatically selecting Realtime 6 for the two exact tested profiles, both rings streamed sensor-reported BPM together for more than three minutes, at roughly one frame per second. The user confirmed both worked. Automatic retry after measurement errors also resumed after refitting, but a separate confirmed table test produced false-positive BPM. Continuous acquisition is demonstrated; reliable wear detection is not. This is realtime HR, not PhoneSport. Full session storage and New Session are now verified separately; unresolved wear detection prevents declaring the whole project complete.
 
 The original browser client requested type-1 HR repeatedly with START. The first correction then copied a 10-sample continuation rule from RingCLI. **The first physical-device baseline contradicts using that rule universally:** CONTINUE was repeatedly followed by long gaps in valid readings on the newer ring. A retained BPM value does not prove that new measurements are arriving, and a successful GATT write does not prove the ring resumed acquisition.
 
@@ -155,7 +155,7 @@ Current Gadgetbridge additionally implements standalone `0x1E`: [enable/disable 
 
 Passing software checks verifies command handling and state transitions, not optical sensor performance or support in a particular firmware.
 
-Run the regression suite from `webapp` with `npm test`. The latest completed gate passed 52 tests. The suite does not contact Bluetooth hardware, Neon, or Suno; software results do not complete hardware checks. Full per-participant session time-series storage, a fresh session after a track reset while keeping BLE connections, and final test-data cleanup were requested but are **deferred and not implemented** in this checkpoint.
+Run the regression suite from `webapp` with `npm test`. The latest completed gate passed 87 tests. The suite does not contact Bluetooth hardware, Neon, or Suno; software results do not complete hardware checks. Full per-participant session storage, New Session while retaining BLE, and authorized testing-data cleanup are now completed; see [session verification](session-recording-verification.md).
 
 ## Remaining limits
 
@@ -230,6 +230,8 @@ An offline audit of retained reports found seven unique battery responses for th
 Full per-participant session recording and New Session are implemented and verified against the real rings and existing database. New Session preserves both Bluetooth connections. The authorized testing-data cleanup removed all 67 sessions, 8,883 readings and 46 song rows while retaining schema and sequences, after test uploads finished. See [session-recording-verification.md](session-recording-verification.md) for the automated, browser and real-database evidence. Suno remains paused; song-ready behavior is verified by automated tests, not a paid song generation.
 
 ### Further measurement comparisons
+
+A bounded **Observe without retries (120s)** diagnostic now isolates native firmware behavior after removal/refitting. It can start only on an already healthy verified realtime profile, sends no START or raw command, suppresses automatic retries and battery queries, and keeps incoming error/HR frames in the normal report. Contact errors clear displayed HR without issuing recovery commands. At 120 seconds (or manual Stop observation) it sends the normal HR STOP and stays paused until manual Retry; a hung STOP closes GATT. Disconnect cancels the timer, and mode changes, optical captures and retries are blocked while observing. Software regressions cover error/refit packets without intervening writes, timeout, reconnect cancellation and hung STOP. This is an experiment, not an accepted wear detector; its physical result remains pending.
 
 The corrected Realtime 6 UI and three-minute dual-ring run have passed the sustained-stream check. Preserve that behavior while separately investigating off-body reliability and testing later storage/session changes. Standard versus Legacy already produced the same short-burst pattern; further batched-mode comparisons are optional unless type 6 fails on a different revision.
 

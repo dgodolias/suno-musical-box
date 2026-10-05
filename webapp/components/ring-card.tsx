@@ -54,6 +54,7 @@ export default function RingCard({
   const [measurementMode, setMeasurementMode] = useState<HeartRateMode>("standard");
   const [diagnosticMessage, setDiagnosticMessage] = useState("");
   const [diagnosticReport, setDiagnosticReport] = useState("");
+  const passiveObservation = Boolean(diagnostics?.passiveObservationEndsAt);
   const ringRef = useRef<RingConnection | null>(null);
   const onDataRef = useRef(onData);
   const onConnectionChangeRef = useRef(onConnectionChange);
@@ -350,7 +351,7 @@ export default function RingCard({
                 id={`ring-${personId}-hr-mode`}
                 className="w-full rounded border border-border bg-background px-2 py-1.5 text-foreground"
                 value={measurementMode}
-                disabled={retrying || opticalActionPending || opticalActive || !isConnected}
+                disabled={retrying || opticalActionPending || opticalActive || passiveObservation || !isConnected}
                 onChange={(event) => void changeMeasurementMode(event.target.value)}
               >
                 <option value="standard">Standard</option>
@@ -363,25 +364,42 @@ export default function RingCard({
               <Button variant="ghost" size="sm" onClick={() => setDiagnosticReport(ringRef.current?.getDebugReport() ?? "")}>
                 Show report
               </Button>
-              {isConnected && <Button variant="ghost" size="sm" disabled={opticalActive || opticalActionPending} onClick={() => void ringRef.current?.refreshBattery(true)}>
+              {isConnected && <Button variant="ghost" size="sm" disabled={opticalActive || opticalActionPending || passiveObservation} onClick={() => void ringRef.current?.refreshBattery(true)}>
                 Refresh battery
               </Button>}
               {isConnected && (
-                <Button variant="ghost" size="sm" onClick={handleRetry} disabled={retrying || opticalActionPending || opticalActive}>
+                <Button variant="ghost" size="sm" onClick={handleRetry} disabled={retrying || opticalActionPending || opticalActive || passiveObservation}>
                   {retrying ? "Restarting..." : "Retry measurement"}
                 </Button>
               )}
             </div>
+            {isConnected && measurementMode === "realtime" && (
+              <div className="mt-3 space-y-2 rounded border border-border/60 p-3">
+                <p>Observe removal and refitting without automatic retries. Stops after 120 seconds; resume with Retry measurement.</p>
+                <Button variant="outline" size="sm" disabled={opticalActive || opticalActionPending || retrying || (!passiveObservation && diagnostics.measurementState !== "measuring")} onClick={async () => {
+                  try {
+                    setDiagnosticMessage("");
+                    if (passiveObservation) await ringRef.current?.stopPassiveObservation();
+                    else ringRef.current?.startPassiveObservation();
+                  } catch (error) {
+                    setDiagnosticMessage(error instanceof Error ? error.message : String(error));
+                  }
+                }}>
+                  {passiveObservation ? "Stop observation" : "Observe without retries (120s)"}
+                </Button>
+                {passiveObservation && <p role="status">No automatic retries · {Math.max(0, Math.ceil((diagnostics.passiveObservationEndsAt - now) / 1000))}s remaining</p>}
+              </div>
+            )}
             {isConnected && (
               <div className="mt-3 space-y-2 rounded border border-border/60 p-3">
                 <p className="font-medium">Optical diagnostic</p>
                 <p>Short sensor capture. Packet collection ends automatically; check that the ring lights switch off. Resume heart rate with Retry measurement.</p>
                 {opticalDisabled && <p>Disabled for this ring: sensor lights remained on after STOP and disconnect.</p>}
                 <div className="flex flex-wrap gap-2">
-                  <Button variant="outline" size="sm" disabled={opticalDisabled || retrying || opticalActionPending || opticalActive} onClick={() => void runOpticalDiagnostic(15000)}>
+                  <Button variant="outline" size="sm" disabled={opticalDisabled || retrying || opticalActionPending || opticalActive || passiveObservation} onClick={() => void runOpticalDiagnostic(15000)}>
                     Optical test 15s
                   </Button>
-                  <Button variant="ghost" size="sm" disabled={opticalDisabled || retrying || opticalActionPending || opticalActive} onClick={() => void runOpticalDiagnostic(30000)}>
+                  <Button variant="ghost" size="sm" disabled={opticalDisabled || retrying || opticalActionPending || opticalActive || passiveObservation} onClick={() => void runOpticalDiagnostic(30000)}>
                     Optical test 30s
                   </Button>
                   {opticalActive && (

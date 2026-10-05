@@ -6,6 +6,69 @@ const test = require("node:test");
 const vm = require("node:vm");
 const ts = require("typescript");
 
+test("passive removal/refit observation suppresses retries and ends with bounded STOP", async () => {
+  const h = harness({ deviceInfo: true, firmware: "RT02R_3.11.00_250611", hardware: "RT02R_V3.1" });
+  await h.ring.scan();
+  h.notify(packet(0x69, 6, 0, 75));
+  h.ring.startPassiveObservation();
+  const writes = h.writes.length;
+  h.notify(packet(0x69, 6, 1));
+  h.notify(packet(0x69, 6, 2));
+  assert.equal(h.ring.data.heartRate, null);
+  assert.equal(h.ring.diagnostics.measurementState, "waiting-for-contact");
+  await h.advance(95_000);
+  await h.ring.refreshBattery(true);
+  assert.equal(h.writes.length, writes);
+  await assert.rejects(h.ring.retryMeasurement(), /Stop passive/);
+  await assert.rejects(h.ring.setHeartRateMode("standard"), /Stop passive/);
+  await assert.rejects(h.ring.startOpticalDiagnostic(), /Stop passive/);
+  h.notify(packet(0x69, 6, 0, 77));
+  assert.equal(h.ring.diagnostics.measurementState, "measuring");
+  assert.equal(h.freshReadings.length, 2);
+  await h.advance(25_000);
+  assert.equal(h.writes.length, writes + 1);
+  assert.equal(h.writes.at(-1).bytes[0], 0x6a);
+  assert.equal(h.ring.diagnostics.measurementState, "paused");
+  assert.equal(h.ring.diagnostics.passiveObservationEndsAt, 0);
+  h.notify(packet(0x69, 6, 0, 78));
+  assert.equal(h.freshReadings.length, 2);
+  await h.advance(120_000);
+  assert.equal(h.writes.length, writes + 1);
+});
+
+test("passive observation cancellation cannot stop a later connection", async () => {
+  const h = harness({ deviceInfo: true, firmware: "RT02R_3.11.00_250611", hardware: "RT02R_V3.1" });
+  await h.ring.scan();
+  assert.throws(() => h.ring.startPassiveObservation(), /healthy realtime/);
+  h.notify(packet(0x69, 6, 0, 75));
+  h.ring.startPassiveObservation();
+  await h.advance(20_000);
+  await h.ring.disconnect();
+  await h.ring.scan();
+  const starts = h.ring.diagnostics.startsSent;
+  for (let n = 0; n < 65; n++) { h.notify(packet(0x69, 6, 0, 77)); await h.advance(2_000); }
+  assert.equal(h.ring.state, "connected");
+  assert.equal(h.ring.diagnostics.measurementState, "measuring");
+  assert.equal(h.ring.diagnostics.startsSent, starts);
+  assert.equal(h.ring.diagnostics.passiveObservationEndsAt, 0);
+});
+
+test("a hung passive observation STOP closes GATT and cannot trigger a late restart", async () => {
+  const h = harness({ deviceInfo: true, firmware: "RT02R_3.11.00_250611", hardware: "RT02R_V3.1" });
+  await h.ring.scan();
+  h.notify(packet(0x69, 6, 0, 75));
+  h.ring.startPassiveObservation();
+  const release = h.blockWrites();
+  await h.advance(123_000);
+  assert.equal(h.ring.state, "disconnected");
+  assert.match(h.ring.diagnostics.lastError, /Observation STOP/);
+  const writes = h.writes.length;
+  release();
+  await settle();
+  await h.advance(120_000);
+  assert.equal(h.writes.length, writes);
+});
+
 const protocolCode = compile("lib/ble/colmi-protocol.ts");
 const managerCode = compile("lib/ble/ring-manager.ts");
 

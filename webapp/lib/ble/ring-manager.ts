@@ -47,6 +47,7 @@ export interface RingDiagnostics {
   opticalEndsAt: number;
   lastBatteryAt: number;
   batteryError: string | null;
+  passiveObservationEndsAt: number;
 }
 
 interface OpticalDiagnosticReport {
@@ -77,6 +78,7 @@ const DISCONNECT_TIMEOUT_MS = 3_000;
 const REALTIME_CAPTURE_TIMEOUT_MS = 90_000;
 const CONTACT_RETRY_MS = 3_000;
 const BATTERY_REFRESH_MS = 60_000;
+const PASSIVE_OBSERVATION_MS = 120_000;
 const OPTICAL_STOP_OBSERVATION_MS = 5_000;
 const OPTICAL_STOP_GRACE_MS = 2_000;
 const OPTICAL_FRAME_LIMIT = 512;
@@ -91,7 +93,7 @@ function emptyData(): RingData {
 }
 
 function emptyDiagnostics(): RingDiagnostics {
-  return { measurementState: "idle", packetsReceived: 0, heartRateSamples: 0, lastHeartRateAt: 0, lastPacketAt: 0, startsSent: 0, continuesSent: 0, restartCount: 0, lastError: null, firmware: null, hardware: null, opticalState: "idle", opticalFramesReceived: 0, opticalEndsAt: 0, lastBatteryAt: 0, batteryError: null };
+  return { measurementState: "idle", packetsReceived: 0, heartRateSamples: 0, lastHeartRateAt: 0, lastPacketAt: 0, startsSent: 0, continuesSent: 0, restartCount: 0, lastError: null, firmware: null, hardware: null, opticalState: "idle", opticalFramesReceived: 0, opticalEndsAt: 0, lastBatteryAt: 0, batteryError: null, passiveObservationEndsAt: 0 };
 }
 
 function errorMessage(error: unknown): string {
@@ -121,6 +123,7 @@ export class RingConnection {
   private generation = 0;
   private lastBatteryRequestAt = 0;
   private batteryRequest: Promise<void> | null = null;
+  private passiveObservationTimer: ReturnType<typeof setTimeout> | null = null;
   private measurementGeneration = 0;
   private measurementWanted = false;
   private watchdog: ReturnType<typeof setInterval> | null = null;
@@ -216,6 +219,9 @@ export class RingConnection {
   }
 
   private stopWatchdog() {
+    if (this.passiveObservationTimer !== null) clearTimeout(this.passiveObservationTimer);
+    this.passiveObservationTimer = null;
+    this.diagnostics.passiveObservationEndsAt = 0;
     if (this.watchdog !== null) clearInterval(this.watchdog);
     this.watchdog = null;
     this.measurementWanted = false;
@@ -356,6 +362,7 @@ export class RingConnection {
 
   /** Called by the connected card's clock; requesting battery never restarts HR. */
   refreshBattery(force = false): Promise<void> {
+    if (this.diagnostics.passiveObservationEndsAt) return Promise.resolve();
     if (this.state !== "connected" || this.closing || this.opticalActive) return Promise.resolve();
     if (this.batteryRequest) return this.batteryRequest;
     if (!force && Date.now() - this.lastBatteryRequestAt < BATTERY_REFRESH_MS) return Promise.resolve();
@@ -492,6 +499,7 @@ export class RingConnection {
   }
 
   async startOpticalDiagnostic(duration = 15_000): Promise<void> {
+    if (this.diagnostics.passiveObservationEndsAt) throw new Error("Stop passive observation before optical diagnostics.");
     if (duration !== 15_000 && duration !== 30_000) throw new Error("Optical diagnostics support only 15 or 30 seconds.");
     if (this.closing || this.state !== "connected") throw new Error("Connect the ring before starting an optical diagnostic.");
     if (!this.hasVerifiedRealtimeProfile()) throw new Error("Optical diagnostics are limited to the two verified hardware and firmware profiles.");
@@ -647,6 +655,7 @@ export class RingConnection {
   }
 
   async retryMeasurement(): Promise<void> {
+    if (this.diagnostics.passiveObservationEndsAt) throw new Error("Stop passive observation before retrying.");
     if (this.closing || this.state !== "connected" || this.recoveryPending) return;
     const controlGeneration = ++this.controlGeneration;
     if (this.opticalActive) await this.ensureOpticalStopped();
@@ -661,6 +670,7 @@ export class RingConnection {
   }
 
   async setHeartRateMode(mode: HeartRateMode): Promise<void> {
+    if (this.diagnostics.passiveObservationEndsAt) throw new Error("Stop passive observation before switching modes.");
     if (mode !== "standard" && mode !== "legacy" && mode !== "realtime") throw new Error("Unsupported heart-rate mode");
     const controlGeneration = ++this.controlGeneration;
     if (this.opticalActive) await this.ensureOpticalStopped();
@@ -755,9 +765,49 @@ export class RingConnection {
     }
   }
 
+  /** Observe native removal/refit behavior without START/CONTINUE or battery queries. */
+  startPassiveObservation(): void {
+    if (this.diagnostics.passiveObservationEndsAt) return;
+    if (this.state !== "connected" || this.closing || this.opticalActive || this.recoveryPending ||
+      this.batteryRequest || this.contactRetryAt !== null || this.selectedHeartRateMode !== "realtime" ||
+      !this.hasVerifiedRealtimeProfile() || this.diagnostics.measurementState !== "measuring") {
+      throw new Error("Wait for a healthy realtime stream before observing without retries.");
+    }
+    this.diagnostics.passiveObservationEndsAt = Date.now() + PASSIVE_OBSERVATION_MS;
+    this.record("event", "Passive observation started: no automatic retries or battery queries for 120 seconds");
+    this.passiveObservationTimer = setTimeout(() => void this.stopPassiveObservation(), PASSIVE_OBSERVATION_MS);
+    this.emitDiagnostics();
+  }
+
+  async stopPassiveObservation(): Promise<void> {
+    if (!this.diagnostics.passiveObservationEndsAt) return;
+    this.stopWatchdog();
+    const generation = this.generation;
+    const measurementGeneration = this.measurementGeneration;
+    this.clearLiveHeartRate();
+    this.diagnostics.measurementState = "paused";
+    this.record("event", "Passive observation ended; stopping measurement, manual Retry required");
+    this.emitDiagnostics();
+    const stopped = await this.stopWithTimeout(generation, measurementGeneration);
+    if (generation !== this.generation || measurementGeneration !== this.measurementGeneration) return;
+    if (stopped !== "sent") {
+      this.closeGatt();
+      this.resetData();
+      this.setState("disconnected");
+      this.fail("Observation STOP did not complete; reconnect the ring.");
+    }
+  }
+
   private checkStream() {
     if (!this.measurementWanted || this.state !== "connected" || this.recoveryPending || this.closing) return;
     const now = Date.now();
+    if (this.diagnostics.passiveObservationEndsAt) {
+      if (this.lastMeasurementHeartRateAt && now - this.lastMeasurementHeartRateAt >= HR_STALE_MS) {
+        this.diagnostics.measurementState = "stale";
+        this.emitDiagnostics();
+      }
+      return;
+    }
     if (this.contactRetryAt !== null) {
       if (now >= this.contactRetryAt) {
         this.contactRetryAt = null;
@@ -804,6 +854,14 @@ export class RingConnection {
   }
 
   private waitForContact(reason: string) {
+    if (this.diagnostics.passiveObservationEndsAt) {
+      this.clearLiveHeartRate();
+      this.diagnostics.measurementState = "waiting-for-contact";
+      this.diagnostics.lastError = null;
+      this.record("event", `${reason}; passive observation, no recovery command sent`);
+      this.emitDiagnostics();
+      return;
+    }
     // Removal produced codes 1 then 2 on the two verified profiles. Preserve
     // the first retry deadline: repeated error notifications must not postpone
     // it or generate repeated writes. Zero replies after START get 90s warmup.
