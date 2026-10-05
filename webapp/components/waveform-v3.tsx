@@ -1,0 +1,699 @@
+"use client";
+
+import { useEffect, useRef, type RefObject } from "react";
+import { Headphones, Music, Music2, Music4 } from "lucide-react";
+import { HR_STALE_MS } from "@/lib/ble/ring-manager";
+import type { LiveHeartRates } from "@/lib/heart-rate-channel";
+
+const TAU = Math.PI * 2;
+const STEPS = 200;
+const COARSE = 4; // the irregular fields are sampled every few steps, then interpolated
+const FIELD = STEPS / COARSE;
+const ROWS = 12; // ridges per wave: the live one in front, earlier moments behind it
+const ROW_S = 0.2; // seconds between one ridge and the next one back
+const SLANT = 1.5; // how far the ridges behind trail along the way the wave travels
+const SIGN_ROW = 3; // the BPM figure stands behind this many ridges
+const EDGE = 0.1; // share of the width tapered at each end
+const AMP = 0.25; // tallest bell of the front ridge, as a share of the height
+const DEPTH = 0.16; // how far behind the front ridge the last one sits, as a share of the height
+const APART = 0.08; // how far from the axis each wave sits when out of sync
+const BPM_PER_BELL = 22; // a heart at 66 bpm shows three bells across the screen
+const DRIFT = 0.03; // screens per second both waves travel right when in step
+const SLIDE = 0.009; // extra screens per second for each bpm above the pair's mean
+const TOP_SPEED = 0.13;
+const REST_BPM = 50;
+const REST_AMP = 0.05;
+const SHARED = 7.7; // seed of the shape both waves take once in sync
+const SPARKS = 90;
+
+type Hsl = [number, number, number];
+type Rgb = [number, number, number];
+// Hues are unwrapped so a plain lerp turns the intended way round the wheel
+const VIOLET: Hsl = [252, 85, 70]; // EduCoach primary: the glow of the axis
+const PINK: Hsl = [322, 95, 68]; // both waves once the two hearts agree
+const NIGHT: Rgb = [0.07, 0.05, 0.14]; // the background: what distance and shadow fade into
+// A wave at rest is a pale thread in its own hue, so waking up never passes
+// through pink on the way to its colour
+const PEOPLE = [
+  // Person 1, size 9 ring: red, above the axis
+  { color: [358, 96, 58] as Hsl, rest: [358, 30, 80] as Hsl, side: -1, seed: 0.9 },
+  // Person 2, size 11 ring: blue, below the axis
+  { color: [214, 98, 58] as Hsl, rest: [214, 30, 80] as Hsl, side: 1, seed: 4.1 },
+];
+
+// Same icons as the floating background; they leave from the crests
+const NOTES = [Music, Music2, Headphones, Music4, Music2, Music, Music2, Headphones, Music, Music4, Music2, Music];
+
+// Raised-cosine taper, so both ends of the front ridge rest on the axis
+const TAPER = Array.from({ length: STEPS + 1 }, (_, j) => {
+  const u = Math.min(j, STEPS - j) / STEPS;
+  return u < EDGE ? 0.5 - 0.5 * Math.cos((Math.PI * u) / EDGE) : 1;
+});
+// Both ends fade into the background
+const FADE = Array.from({ length: STEPS + 1 }, (_, j) => {
+  const u = Math.min(1, Math.min(j, STEPS - j) / (STEPS * 0.05));
+  return u * u * (3 - 2 * u);
+});
+
+const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+const clamp = (value: number, low: number, high: number) => Math.min(high, Math.max(low, value));
+const mix = (a: Hsl, b: Hsl, t: number): Hsl => [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
+
+function rgb([h, s, l]: Hsl, dl = 0): Rgb {
+  const light = (l + dl) / 100;
+  const a = (s / 100) * Math.min(light, 1 - light);
+  const f = (n: number) => {
+    const k = (n + (h + 360) / 30) % 12;
+    return light - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+  };
+  return [f(0), f(8), f(4)];
+}
+
+// Smooth value noise, 0-1: the same place always gives the same value
+function grain(x: number, y: number) {
+  const xi = Math.floor(x);
+  const yi = Math.floor(y);
+  const knot = (i: number, j: number) => {
+    let h = Math.imul(i, 374761393) + Math.imul(j, 668265263);
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+  };
+  const u = (x - xi) ** 2 * (3 - 2 * (x - xi));
+  const v = (y - yi) ** 2 * (3 - 2 * (y - yi));
+  return lerp(lerp(knot(xi, yi), knot(xi + 1, yi), u), lerp(knot(xi, yi + 1), knot(xi + 1, yi + 1), u), v);
+}
+// Stretches the middle of the noise out to the whole 0-1 range
+const spread = (n: number) => {
+  const s = clamp((n - 0.24) / 0.52, 0, 1);
+  return s * s * (3 - 2 * s);
+};
+// Irregular 0-1 values for a place on the screen and a moment; they keep
+// changing, so no bell holds its shape and no two look alike
+type Field = (x: number, t: number, seed: number) => number;
+const wander: Field = (x, t, seed) =>
+  spread(0.65 * grain(3.4 * x + seed, 0.16 * t + seed) + 0.35 * grain(7.9 * x + seed * 3.1, 0.27 * t - seed));
+const roam: Field = (x, t, seed) => spread(grain(2.6 * x + seed * 1.7, 0.13 * t + seed));
+
+// Strips of [x, y, side, half, r, g, b, opacity]: `side` runs -1..1 across a
+// stroke and `half` is its half width in pixels, which feathers the rim; a
+// negative `half` asks for a soft halo instead. Opacity below zero is light,
+// added to what is behind it; above zero it is paint that covers it.
+const STRIP_VERTEX = `
+attribute vec2 a_at;
+attribute vec2 a_rim;
+attribute vec4 a_ink;
+uniform vec2 u_size;
+varying vec2 v_rim;
+varying vec4 v_ink;
+void main() {
+  v_rim = a_rim;
+  v_ink = a_ink;
+  gl_Position = vec4(a_at / u_size * vec2(2.0, -2.0) + vec2(-1.0, 1.0), 0.0, 1.0);
+}`;
+const STRIP_FRAGMENT = `
+precision mediump float;
+varying vec2 v_rim;
+varying vec4 v_ink;
+void main() {
+  float rim = 1.0 - abs(v_rim.x);
+  float cover = (v_rim.y < 0.0 ? rim * rim : clamp(rim * v_rim.y, 0.0, 1.0)) * abs(v_ink.a);
+  gl_FragColor = vec4(v_ink.rgb * cover, v_ink.a < 0.0 ? 0.0 : cover);
+}`;
+// The BPM figures: glowing text painted on a 2D canvas, drawn as light
+const SIGN_VERTEX = `
+attribute vec2 a_at;
+attribute vec2 a_uv;
+uniform vec2 u_size;
+varying vec2 v_uv;
+void main() {
+  v_uv = a_uv;
+  gl_Position = vec4(a_at / u_size * vec2(2.0, -2.0) + vec2(-1.0, 1.0), 0.0, 1.0);
+}`;
+const SIGN_FRAGMENT = `
+precision mediump float;
+uniform sampler2D u_figure;
+uniform vec4 u_tint;
+varying vec2 v_uv;
+void main() {
+  gl_FragColor = vec4(u_tint.rgb * (texture2D(u_figure, v_uv).a * u_tint.a), 0.0);
+}`;
+const FLOATS = 8;
+// Per wave: a flank and a line per ridge, then four strokes on the front one;
+// after both, two glows between them, two strokes on the axis and the sparks
+const STRIP_VERTICES = (2 * (2 * ROWS + 4) + 4) * ((STEPS + 1) * 2 + 2) + SPARKS * 6;
+const SIGN_W = 512;
+const SIGN_H = 256;
+
+function link(gl: WebGLRenderingContext, vertex: string, fragment: string) {
+  const program = gl.createProgram();
+  for (const [type, source] of [[gl.VERTEX_SHADER, vertex], [gl.FRAGMENT_SHADER, fragment]] as const) {
+    const shader = gl.createShader(type);
+    if (!shader) return null;
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    gl.attachShader(program, shader);
+  }
+  gl.linkProgram(program);
+  return gl.getProgramParameter(program, gl.LINK_STATUS) ? program : null;
+}
+
+interface Wave {
+  bpm: number; // eased reading: sets how many bells fit across the screen
+  quick: number; // the reading over the last couple of seconds...
+  calm: number; // ...and over the last ten, to tell rising from falling
+  level: number; // 0 at rest, 1 live
+  amp: number; // eased bell height, 0-1
+  speed: number; // screens per second, positive to the right
+  offset: number; // how far the bells have travelled, in bells
+  sheen: number; // where the light running along the front ridge is, in screens
+  beat: number; // heartbeats since the page opened, for the notes
+  due: number; // sparks owed
+  shown: number | null; // the figure painted on its sign
+  flash: number; // lights the sign up when the figure changes
+  color: Hsl;
+  line: Float32Array; // where the front ridge runs
+  base: Float32Array; // the line it rests on
+  bell: Float32Array; // how far along its swing each point is
+  sign: CanvasRenderingContext2D | null;
+  figure: WebGLTexture | null;
+}
+
+// v2 with depth. One wave per heart on either side of a shared axis, red above
+// for Person 1 and blue below for Person 2, but each is now a range of ridges:
+// the live one in front and, behind it, the same wave a moment earlier each,
+// smaller and dimmer with distance. A ridge has a solid flank lit from the
+// left, so the range reads as a landscape; the ridges trail the way the wave
+// is travelling, and the BPM stands among them as a figure of light.
+// The meaning is v2's: a faster heart packs more, steeper and taller bells and
+// travels right while the slower one travels left; as the rates converge the
+// ranges close in on the axis, turn pink and fall into step, until one is the
+// mirror image of the other, and bells that face each other light the space
+// between them.
+export default function WaveformV3({ ratesRef }: { ratesRef: RefObject<LiveHeartRates> }) {
+  const stageRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const stage = stageRef.current;
+    const canvas = canvasRef.current;
+    const gl = canvas?.getContext("webgl", { antialias: false });
+    if (!stage || !canvas || !gl) return;
+    const notes = stage.querySelectorAll<HTMLElement>("[data-note]");
+    const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    const strips = link(gl, STRIP_VERTEX, STRIP_FRAGMENT);
+    const signs = link(gl, SIGN_VERTEX, SIGN_FRAGMENT);
+    if (!strips || !signs) return;
+    const stripBuffer = gl.createBuffer();
+    const signBuffer = gl.createBuffer();
+    // Returns a switch to the given program, with its attributes on its buffer
+    const switchTo = (program: WebGLProgram, buffer: WebGLBuffer, layout: [string, number][]) => {
+      const stride = layout.reduce((sum, [, size]) => sum + size, 0) * 4;
+      const locations = layout.map(([name]) => gl.getAttribLocation(program, name));
+      const uSize = gl.getUniformLocation(program, "u_size");
+      return () => {
+        gl.useProgram(program);
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        for (let index = 0; index < 3; index++) gl.disableVertexAttribArray(index);
+        let skip = 0;
+        layout.forEach(([, size], i) => {
+          gl.enableVertexAttribArray(locations[i]);
+          gl.vertexAttribPointer(locations[i], size, gl.FLOAT, false, stride, skip * 4);
+          skip += size;
+        });
+        gl.uniform2f(uSize, canvas.width, canvas.height);
+      };
+    };
+    const toStrips = switchTo(strips, stripBuffer, [["a_at", 2], ["a_rim", 2], ["a_ink", 4]]);
+    const toSigns = switchTo(signs, signBuffer, [["a_at", 2], ["a_uv", 2]]);
+    const uTint = gl.getUniformLocation(signs, "u_tint");
+    // Colours come out premultiplied: paint covers, light (no opacity) adds
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.clearColor(0, 0, 0, 0);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+
+    const resize = () => {
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      canvas.width = Math.round(stage.clientWidth * dpr);
+      canvas.height = Math.round(stage.clientHeight * dpr);
+      gl.viewport(0, 0, canvas.width, canvas.height);
+    };
+    const observer = new ResizeObserver(resize);
+    observer.observe(stage);
+    resize();
+
+    const row = () => new Float32Array(STEPS + 1);
+    const waves: Wave[] = PEOPLE.map(() => {
+      const sign = document.createElement("canvas");
+      sign.width = SIGN_W;
+      sign.height = SIGN_H;
+      const figure = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, figure);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, sign);
+      return {
+        bpm: REST_BPM, quick: REST_BPM, calm: REST_BPM, level: 0, amp: REST_AMP, speed: DRIFT, offset: 0, sheen: 0,
+        beat: 0, due: 0, shown: null, flash: 0, color: VIOLET, line: row(), base: row(), bell: row(),
+        sign: sign.getContext("2d"), figure,
+      };
+    });
+    // The page's display font, once it has loaded
+    let family = "sans-serif";
+    const paintSign = (w: Wave) => {
+      const ctx = w.sign;
+      if (!ctx) return;
+      ctx.clearRect(0, 0, SIGN_W, SIGN_H);
+      if (w.shown !== null) {
+        ctx.font = `700 ${SIGN_H * 0.74}px ${family}`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillStyle = "#fff";
+        ctx.shadowColor = "#fff";
+        // A wide glow, then the figure itself
+        ctx.shadowBlur = SIGN_H * 0.12;
+        ctx.globalAlpha = 0.55;
+        ctx.fillText(String(w.shown), SIGN_W / 2, SIGN_H * 0.54);
+        ctx.shadowBlur = 0;
+        ctx.globalAlpha = 1;
+        ctx.fillText(String(w.shown), SIGN_W / 2, SIGN_H * 0.54);
+      }
+      gl.bindTexture(gl.TEXTURE_2D, w.figure);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, ctx.canvas);
+    };
+    let live = true;
+    const display = getComputedStyle(document.documentElement).getPropertyValue("--font-display").trim();
+    if (display) {
+      document.fonts.load(`700 64px ${display}`).then(() => {
+        if (!live) return;
+        family = `${display}, sans-serif`;
+        waves.forEach(paintSign);
+      }, () => {});
+    }
+
+    const frontX = row();
+    const farX = row();
+    const farY = row();
+    const axis = row();
+    const shine = row();
+    const tall = new Float32Array(FIELD + 1);
+    const wide = new Float32Array(FIELD + 1);
+    const rough = new Float32Array(FIELD + 1);
+    const vertices = new Float32Array(STRIP_VERTICES * FLOATS);
+    const quad = new Float32Array(16);
+    const spark = {
+      x: new Float32Array(SPARKS), y: new Float32Array(SPARKS), vx: new Float32Array(SPARKS),
+      vy: new Float32Array(SPARKS), age: new Float32Array(SPARKS).fill(1), life: new Float32Array(SPARKS).fill(1),
+      who: new Uint8Array(SPARKS),
+    };
+    const opened = performance.now();
+    let filled = 0;
+    let ink: Rgb = [0, 0, 0];
+    let sync = 0; // 0 = apart, 1 = the two hearts agree
+    let harmony = 0; // builds up while they stay in sync
+    let last = opened;
+    let nextNote = 0;
+    let nextSpark = 0;
+    let raf = 0;
+
+    const vertex = (x: number, y: number, side: number, half: number, r: number, g: number, b: number, a: number) => {
+      vertices[filled++] = x;
+      vertices[filled++] = y;
+      vertices[filled++] = side;
+      vertices[filled++] = half;
+      vertices[filled++] = r;
+      vertices[filled++] = g;
+      vertices[filled++] = b;
+      vertices[filled++] = a;
+    };
+    // Every strip starts with a zero-area bridge from the one before it
+    const bridge = (x: number, y: number) => {
+      if (filled === 0) return;
+      vertices.copyWithin(filled, filled - FLOATS, filled);
+      filled += FLOATS;
+      vertex(x, y, 0, 1, 0, 0, 0, 0);
+    };
+    // A line of light `width` pixels wide along a ridge in the current ink,
+    // or a soft halo of that reach; `glint` brightens it along the way
+    const stroke = (
+      xs: Float32Array, ys: Float32Array, step: number, width: number, alpha: number, halo = false,
+      glint?: Float32Array
+    ) => {
+      const reach = halo ? width : width / 2 + 0.5;
+      const half = halo ? -1 : reach;
+      for (let j = 0; j <= STEPS; j += step) {
+        // A halo goes straight up and down: wide strips fold over on tight bends
+        let ox = 0;
+        let oy = reach;
+        if (!halo) {
+          const ahead = Math.min(j + step, STEPS);
+          const behind = Math.max(j - step, 0);
+          const dy = ys[ahead] - ys[behind];
+          const run = xs[ahead] - xs[behind];
+          const scale = reach / Math.hypot(run, dy);
+          ox = -dy * scale;
+          oy = run * scale;
+        }
+        const a = -alpha * FADE[j] * (glint ? glint[j] : 1);
+        if (j === 0) bridge(xs[0] - ox, ys[0] - oy);
+        vertex(xs[j] - ox, ys[j] - oy, -1, half, ink[0], ink[1], ink[2], a);
+        vertex(xs[j] + ox, ys[j] + oy, 1, half, ink[0], ink[1], ink[2], a);
+      }
+    };
+    // The solid flank of a ridge, from its line to the axis: lit where it
+    // climbs to the right, in shadow where it falls, darkening towards its foot
+    const flank = (
+      xs: Float32Array, ys: Float32Array, step: number, side: number, foot: number, tint: Rgb, glow: number
+    ) => {
+      bridge(xs[0], ys[0]);
+      for (let j = 0; j <= STEPS; j += step) {
+        const ahead = Math.min(j + step, STEPS);
+        const behind = Math.max(j - step, 0);
+        const climb = (side * (ys[ahead] - ys[behind])) / (xs[ahead] - xs[behind]);
+        const lit = glow * (0.55 + 0.45 * Math.tanh(1.3 * climb));
+        vertex(
+          xs[j], ys[j], 0, 1, lerp(NIGHT[0], tint[0], lit), lerp(NIGHT[1], tint[1], lit), lerp(NIGHT[2], tint[2], lit),
+          0.95 * FADE[j]
+        );
+        vertex(xs[j], foot, 0, 1, NIGHT[0] * 0.8, NIGHT[1] * 0.8, NIGHT[2] * 0.8, 0.95 * FADE[j]);
+      }
+    };
+
+    const launchNote = (p: number) => {
+      const { line, base, color, speed } = waves[p];
+      const H = canvas.height;
+      // Crests of the front ridge, away from the tapered ends
+      const crests: number[] = [];
+      for (let j = Math.round(STEPS * 0.15); j < STEPS * 0.85; j++) {
+        const rise = Math.abs(line[j] - base[j]);
+        if (rise > H * AMP * 0.3 && rise >= Math.abs(line[j - 1] - base[j - 1]) &&
+          rise > Math.abs(line[j + 1] - base[j + 1])) crests.push(j);
+      }
+      if (crests.length === 0) return;
+      const j = crests[Math.floor(Math.random() * crests.length)];
+      const note = notes[nextNote++ % notes.length];
+      const sway = (Math.random() - 0.5) * 3;
+      // Away from the axis, carried the way the wave is travelling
+      const away = PEOPLE[p].side;
+      const along = clamp(speed / DRIFT, -3, 3);
+      // vw/vh, so the flight scales with the screen
+      const place = (x: number, y: number, scale: number, turn: number) =>
+        `translate(calc(-50% + ${x}vw), calc(-50% + ${away * y}vh)) scale(${scale}) rotate(${turn}deg)`;
+      note.style.left = `${(j / STEPS) * 100}%`;
+      note.style.top = `${(line[j] / H) * 100}%`;
+      note.style.color = `hsl(${color[0]} ${color[1]}% ${color[2] + 12}%)`;
+      // Pop out of the crest, then float off and fade
+      note.animate(
+        [
+          { opacity: 0, transform: place(0, 0, 0.3, 0) },
+          { opacity: 1, transform: place(0.3 * along, 3, 1, sway * 2), offset: 0.15 },
+          { opacity: 0.8, offset: 0.6 },
+          { opacity: 0, transform: place(2.4 * along + sway, 14, 1.1, sway * 6) },
+        ],
+        { duration: 4200, easing: "ease-out" }
+      );
+    };
+    // A spark leaves the front ridge near one of its taller points
+    const launchSpark = (p: number) => {
+      const w = waves[p];
+      let j = 0;
+      for (let tries = 0; tries < 3; tries++) {
+        const pick = Math.round(STEPS * (0.08 + 0.84 * Math.random()));
+        if (tries === 0 || Math.abs(w.line[pick] - w.base[pick]) > Math.abs(w.line[j] - w.base[j])) j = pick;
+      }
+      const i = nextSpark++ % SPARKS;
+      spark.x[i] = frontX[j];
+      spark.y[i] = w.line[j];
+      spark.vx[i] = canvas.width * (w.speed * (1.5 + 2 * Math.random()) + (Math.random() - 0.5) * 0.03);
+      spark.vy[i] = PEOPLE[p].side * canvas.height * (0.04 + 0.09 * Math.random());
+      spark.age[i] = 0;
+      spark.life[i] = 1.4 + 1.6 * Math.random();
+      spark.who[i] = p;
+    };
+
+    const frame = (now: number) => {
+      const dt = (now - last) / 1000;
+      last = now;
+      const t = still ? 0 : (now - opened) / 1000;
+      const ease = (tau: number) => 1 - Math.exp(-dt / tau);
+      // A reading counts until it is as old as the ring card's stale limit
+      const wall = Date.now();
+      const bpm = ratesRef.current.map((s) => (s && wall - s.at < HR_STALE_MS ? s.bpm : null));
+      const gap = bpm[0] !== null && bpm[1] !== null ? Math.abs(bpm[0] - bpm[1]) : null;
+      const mean = bpm[0] !== null && bpm[1] !== null ? (bpm[0] + bpm[1]) / 2 : null;
+
+      sync += ((gap === null ? 0 : 1 / (1 + (gap / 6) ** 2)) - sync) * ease(1.2);
+      harmony += ((sync > 0.75 ? 1 : 0) - harmony) * ease(sync > 0.75 ? 5 : 2.5);
+      // Within a few BPM of each other the two waves pull into step
+      const pull = gap === null ? 0
+        : (0.25 / (1 + (gap / 2.5) ** 2)) * Math.sin(TAU * (waves[1].offset - waves[0].offset)) * Math.min(dt, 0.1);
+
+      waves.forEach((w, p) => {
+        const b = bpm[p];
+        const reading = b ?? REST_BPM;
+        // A reading that has just appeared is neither rising nor falling yet
+        if (b !== null && w.level < 0.02) w.quick = w.calm = b;
+        w.level += ((b === null ? 0 : 1) - w.level) * ease(0.8);
+        w.bpm += (reading - w.bpm) * ease(2);
+        w.quick += (reading - w.quick) * ease(1.5);
+        w.calm += (reading - w.calm) * ease(10);
+        // Faster hearts swing wider, more so while they are speeding up
+        const rising = clamp((w.quick - w.calm) / 5, -1, 1);
+        const swing = b === null ? REST_AMP : (0.62 + 0.38 * clamp((b - 55) / 55, 0, 1)) * (1 + 0.2 * rising);
+        w.amp += (swing - w.amp) * ease(1.2);
+        // Above the pair's mean a wave travels right, below it left
+        const heading = b === null || mean === null ? DRIFT : DRIFT + SLIDE * (b - mean);
+        w.speed += (clamp(heading, -TOP_SPEED, TOP_SPEED) - w.speed) * ease(1.5);
+        w.color = mix(mix(PEOPLE[p].rest, PEOPLE[p].color, w.level), PINK, sync);
+        // The sign keeps its last figure while it fades out with the wave
+        if (b !== null && b !== w.shown) {
+          w.shown = b;
+          w.flash = 1;
+          paintSign(w);
+        }
+        w.flash *= Math.exp(-dt / 0.5);
+        if (still) return;
+        w.offset += ((w.speed * w.bpm) / BPM_PER_BELL) * dt + (p === 0 ? pull : -pull);
+        w.sheen += 4 * w.speed * dt;
+        const beats = Math.floor(w.beat);
+        w.beat += (reading / 60) * dt;
+        if (b !== null && dt < 0.25 && Math.floor(w.beat) > beats && Math.random() < 0.3 + 0.3 * harmony) {
+          launchNote(p);
+        }
+        // More sparks the faster it travels and the longer the two agree
+        w.due += w.level * (8 + 12 * Math.abs(w.speed) / TOP_SPEED + 12 * harmony) * Math.min(dt, 0.1);
+        for (; w.due >= 1; w.due--) launchSpark(p);
+      });
+
+      const W = canvas.width;
+      const H = canvas.height;
+      const cy = H / 2;
+      const unit = H / 1080;
+      // Out of sync each wave keeps its distance from the axis; in sync, or
+      // while one of them is still at rest, they meet on it
+      const apart = APART * (1 - sync) * waves[0].level * waves[1].level;
+      // Each wave's own irregular value; in sync both take the shared one, so
+      // one ends up the mirror image of the other
+      const own = (field: Field, x: number, at: number, seed: number, trait: number) =>
+        sync < 0.01 ? field(x, at, seed + trait)
+          : sync > 0.99 ? field(x, at, SHARED + trait)
+            : lerp(field(x, at, seed + trait), field(x, at, SHARED + trait), sync);
+      for (let j = 0; j <= STEPS; j++) frontX[j] = (j / STEPS) * W;
+
+      // Where ridge `k` of wave `p` runs: the wave as it was k moments ago,
+      // narrower, lower and closer to the ridges around it with distance
+      const ridge = (
+        p: number, k: number, xs: Float32Array, ys: Float32Array, bell?: Float32Array, base?: Float32Array
+      ) => {
+        const w = waves[p];
+        const { side, seed } = PEOPLE[p];
+        const far = k / (ROWS - 1);
+        const then = t - k * ROW_S;
+        const bells = w.bpm / BPM_PER_BELL;
+        const offset = w.offset - w.speed * bells * k * ROW_S * SLANT;
+        const hurry = clamp((w.bpm - 55) / 55, 0, 1);
+        // Bells lean the way they travel
+        const lean = 0.35 * Math.tanh(w.speed / 0.04);
+        // At rest the range folds back into a single thread on the axis
+        const scale = 1 - 0.2 * far * w.level;
+        const lift = DEPTH * (1 - (1 - far) ** 1.7) * w.level;
+        // The whole wave swells and settles at no fixed pace, and a swell
+        // keeps rolling from the front ridge to the back
+        const breath = 0.82 + 0.18 * lerp(grain(0.11 * then + seed, seed), grain(0.11 * then, SHARED), sync);
+        const roll = 1 + 0.12 * Math.sin(TAU * (0.8 * far - 0.3 * t));
+        const reach = w.amp * breath * roll * (1 - 0.45 * far) * AMP * H;
+        for (let c = 0; c <= FIELD; c++) {
+          tall[c] = own(wander, c / FIELD, then, seed, 0);
+          wide[c] = own(roam, c / FIELD, then, seed, 11);
+          rough[c] = own(roam, c / FIELD, then, seed, 31);
+        }
+        for (let j = 0; j <= STEPS; j++) {
+          const x = j / STEPS;
+          const c = Math.min(FIELD - 1, Math.floor(j / COARSE));
+          const f = j / COARSE - c;
+          const height = lerp(tall[c], tall[c + 1], f);
+          const width = lerp(wide[c], wide[c + 1], f);
+          const grit = lerp(rough[c], rough[c + 1], f);
+          // No two bells are as wide, as tall or as steep as each other...
+          const phase = bells * (x - 0.5) - offset + 0.34 * (width - 0.5);
+          const peak = Math.sin(Math.PI * (phase - Math.floor(phase)) ** Math.exp(lean + 0.5 * (width - 0.5))) **
+            (2.2 + 1.6 * hurry + 1.6 * (grit - 0.5));
+          // ...and the valleys between them rarely reach the floor
+          const swung = peak * (0.3 + 0.7 * height) + 0.2 * grit * (1 - peak);
+          const floor = cy + side * (apart * TAPER[j] + lift) * H;
+          xs[j] = (0.5 + (x - 0.5) * scale) * W;
+          ys[j] = floor + side * reach * TAPER[j] * swung;
+          if (bell) bell[j] = swung;
+          if (base) base[j] = floor;
+        }
+      };
+
+      filled = 0;
+      const cuts: number[] = [];
+      waves.forEach((w, p) => {
+        const { side } = PEOPLE[p];
+        const tint = rgb(w.color);
+        for (let k = ROWS - 1; k >= 0; k--) {
+          // The sign goes in here, in front of the ridges already drawn
+          if (k === SIGN_ROW - 1) cuts.push(filled / FLOATS);
+          const front = k === 0;
+          const xs = front ? frontX : farX;
+          const ys = front ? w.line : farY;
+          if (front) ridge(p, 0, xs, ys, w.bell, w.base);
+          else ridge(p, k, xs, ys);
+          const far = k / (ROWS - 1);
+          // Distant ridges are drawn with half the points
+          const step = k < 4 ? 1 : 2;
+          flank(xs, ys, step, side, cy, tint, (0.6 - 0.36 * far) * (0.35 + 0.65 * w.level));
+          ink = tint;
+          if (!front) {
+            stroke(xs, ys, step, lerp(2.4, 1, far) * unit, lerp(0.7, 0.16, far) * (0.3 + 0.7 * w.level));
+            continue;
+          }
+          // Light runs along the front ridge the way the wave is going
+          const flow = 0.7 * w.level * Math.min(1, Math.abs(w.speed) / DRIFT);
+          for (let j = 0; j <= STEPS; j++) {
+            const u = (j / STEPS - w.sheen) * 3;
+            shine[j] = 1 + flow * Math.exp(-(((u - Math.floor(u) - 0.5) / 0.12) ** 2));
+          }
+          stroke(xs, ys, 1, 60 * unit, 0.08, true, shine);
+          stroke(xs, ys, 1, 22 * unit, 0.22, true, shine);
+          stroke(xs, ys, 1, 3.4 * unit, 0.95, false, shine);
+          ink = rgb(w.color, 22);
+          stroke(xs, ys, 1, 1.2 * unit, 0.8, false, shine);
+        }
+        cuts.push(filled / FLOATS);
+      });
+
+      // Wherever a bell of one wave faces a bell of the other, the space
+      // between them lights up pink
+      const together = Math.min(waves[0].level, waves[1].level);
+      const lit = together * (0.14 + 0.5 * sync + 0.22 * harmony);
+      waves.forEach((w) => {
+        const heart = rgb(mix(w.color, PINK, 0.6), 6);
+        bridge(0, w.line[0]);
+        for (let j = 0; j <= STEPS; j++) {
+          const meet = -lit * waves[0].bell[j] * waves[1].bell[j] * FADE[j];
+          vertex(frontX[j], w.line[j], 0, 1, heart[0], heart[1], heart[2], meet * 0.25);
+          vertex(frontX[j], cy, 0, 1, heart[0], heart[1], heart[2], meet);
+        }
+      });
+      // The axis they meet on glows as they get closer
+      axis.fill(cy);
+      ink = rgb(mix(VIOLET, PINK, sync));
+      stroke(frontX, axis, 1, 0.16 * H, 0.05 + 0.1 * sync + 0.08 * harmony, true);
+      stroke(frontX, axis, 1, 1.4 * unit, 0.35 + 0.4 * sync);
+      // Sparks: short streaks of light, brightest at the head
+      for (let i = 0; i < SPARKS; i++) {
+        if (spark.age[i] >= spark.life[i]) continue;
+        const w = waves[spark.who[i]];
+        if (!still) {
+          spark.age[i] += dt;
+          spark.x[i] += spark.vx[i] * dt;
+          spark.y[i] += spark.vy[i] * dt;
+        }
+        const left = 1 - spark.age[i] / spark.life[i];
+        const glow = -0.9 * left * left * w.level;
+        const [r, g, b] = rgb(w.color, 16);
+        const speed = Math.hypot(spark.vx[i], spark.vy[i]) || 1;
+        const reach = (2.5 + 4 * left) * unit;
+        const nx = (-spark.vy[i] / speed) * reach;
+        const ny = (spark.vx[i] / speed) * reach;
+        const tx = spark.x[i] - spark.vx[i] * 0.22;
+        const ty = spark.y[i] - spark.vy[i] * 0.22;
+        bridge(spark.x[i] - nx, spark.y[i] - ny);
+        vertex(spark.x[i] - nx, spark.y[i] - ny, -1, -1, r, g, b, glow);
+        vertex(spark.x[i] + nx, spark.y[i] + ny, 1, -1, r, g, b, glow);
+        vertex(tx - nx, ty - ny, -1, -1, r, g, b, 0);
+        vertex(tx + nx, ty + ny, 1, -1, r, g, b, 0);
+      }
+
+      // Each wave's BPM as a figure of light standing among its ridges: the
+      // nearest ones pass in front of it, and it shows through them dimmed,
+      // as if half sunk into the wave
+      const drawSign = (p: number, opacity: number) => {
+        const w = waves[p];
+        const height = 0.2 * H * (1 + 0.06 * w.flash);
+        const middle = cy + PEOPLE[p].side * (apart + 0.135 + 0.006 * Math.sin(0.6 * t + p)) * H;
+        quad.set([
+          W / 2 - height, middle - height / 2, 0, 0, W / 2 + height, middle - height / 2, 1, 0,
+          W / 2 - height, middle + height / 2, 0, 1, W / 2 + height, middle + height / 2, 1, 1,
+        ]);
+        gl.bufferData(gl.ARRAY_BUFFER, quad, gl.DYNAMIC_DRAW);
+        gl.bindTexture(gl.TEXTURE_2D, w.figure);
+        const [r, g, b] = rgb(w.color, 8);
+        gl.uniform4f(uTint, r, g, b, opacity * w.level * (0.8 + 0.4 * w.flash));
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      };
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.bindBuffer(gl.ARRAY_BUFFER, stripBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, vertices.subarray(0, filled), gl.DYNAMIC_DRAW);
+      let drawn = 0;
+      const drawStripsTo = (end: number) => {
+        toStrips();
+        gl.drawArrays(gl.TRIANGLE_STRIP, drawn, end - drawn);
+        drawn = end;
+      };
+      waves.forEach((_, p) => {
+        drawStripsTo(cuts[2 * p]);
+        toSigns();
+        drawSign(p, 0.9);
+        drawStripsTo(cuts[2 * p + 1]);
+      });
+      drawStripsTo(filled / FLOATS);
+      toSigns();
+      waves.forEach((_, p) => drawSign(p, 0.38));
+
+      raf = requestAnimationFrame(frame);
+    };
+    raf = requestAnimationFrame(frame);
+    return () => {
+      live = false;
+      cancelAnimationFrame(raf);
+      observer.disconnect();
+      waves.forEach((w) => gl.deleteTexture(w.figure));
+      gl.deleteBuffer(stripBuffer);
+      gl.deleteBuffer(signBuffer);
+      gl.deleteProgram(strips);
+      gl.deleteProgram(signs);
+    };
+  }, [ratesRef]);
+
+  return (
+    <div ref={stageRef} aria-hidden className="pointer-events-none absolute inset-0">
+      <canvas ref={canvasRef} className="absolute inset-0 size-full" />
+      {NOTES.map((Icon, i) => (
+        <span
+          key={i}
+          data-note
+          className="absolute opacity-0"
+          style={{ filter: "drop-shadow(0 0 0.6vw currentColor)" }}
+        >
+          <Icon strokeWidth={2} style={{ width: `${1.8 + (i % 3) * 0.5}vw`, height: `${1.8 + (i % 3) * 0.5}vw` }} />
+        </span>
+      ))}
+    </div>
+  );
+}
