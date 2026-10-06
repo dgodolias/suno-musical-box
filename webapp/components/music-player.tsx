@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, useEffect } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import SendSongForm from "@/components/send-song-form";
@@ -18,41 +18,118 @@ interface MusicPlayerProps {
   history: Song[];
   generationStatus: string;
   generationProgress?: number;
-  waiting?: boolean; // the song is on its way, after the recording window
   onStarted?: () => void; // the song has started playing, or cannot
   onSongEnd?: () => void;
 }
 
-// Quiet music on a loop while the song is on its way, from public/; none until
-// one of the three Suno takes is chosen
-const WAITING_MUSIC: string | null = null;
-const WAITING_VOLUME = 0.25;
-const FADE_MS = 1500;
+// Quiet music while the song is on its way: take 2B of three Suno candidates
+// (lo-fi, Rhodes, 2 min). Its volume is the listener's, kept in this browser.
+const WAITING_MUSIC = "/waiting-music.mp3";
+const VOLUME_KEY = "musical-box-waiting-volume";
+const DEFAULT_VOLUME = 0.25;
+const FADE_IN_MS = 2000;
+const FADE_OUT_MS = 1000; // quick, so the song comes straight in
+const END_FADE_S = 2.5; // the track's last seconds fade out before it starts again
 
-// Fades in while `playing`, and out (then pauses) as the song takes over. The
-// fade follows the clock, so a background tab's slow timers still finish it.
-function WaitingMusic({ src, playing }: { src: string; playing: boolean }) {
+// The chosen volume, shared by the slider and the music; also kept in memory
+// for browsers that store nothing
+let volumeInMemory = DEFAULT_VOLUME;
+const volumeListeners = new Set<() => void>();
+function readVolume() {
+  try {
+    const saved = localStorage.getItem(VOLUME_KEY);
+    const value = saved === null ? NaN : Number(saved);
+    if (value >= 0 && value <= 1) return value;
+  } catch {
+    // storage unavailable: memory only
+  }
+  return volumeInMemory;
+}
+function saveVolume(value: number) {
+  volumeInMemory = value;
+  try {
+    localStorage.setItem(VOLUME_KEY, String(value));
+  } catch {
+    // storage unavailable: memory only
+  }
+  for (const listener of volumeListeners) listener();
+}
+function subscribeVolume(listener: () => void) {
+  volumeListeners.add(listener);
+  return () => {
+    volumeListeners.delete(listener);
+  };
+}
+
+// Fades in when the page is first used (browsers allow sound only then) and,
+// as the player is a new one, from the top after New Session; carries on
+// through Start; fades out as soon as the song is ready. At the end of the
+// track it fades out and comes back in from the top. The fades follow the
+// clock, so a background tab's slower timers still finish them.
+function WaitingMusic({ playing, volume }: { playing: boolean; volume: number }) {
   const audioRef = useRef<HTMLAudioElement>(null);
-  useEffect(() => {
+  const mix = useRef({ gain: 0, from: 0, to: 0, at: 0, ms: 1, volume, playing });
+  const fadeTo = useCallback((to: number, ms: number) => {
+    const m = mix.current;
+    Object.assign(m, { from: m.gain, to, at: Date.now(), ms });
+  }, []);
+  // Plays on from where the track is, fading in
+  const begin = useCallback(() => {
     const audio = audioRef.current;
-    if (!audio || (!playing && audio.paused)) return;
-    if (playing && audio.paused) {
-      audio.volume = 0;
-      audio.play().catch(() => {});
+    if (!audio || !mix.current.playing) return;
+    audio.play().then(() => fadeTo(1, FADE_IN_MS), () => {});
+  }, [fadeTo]);
+
+  useEffect(() => {
+    mix.current.volume = volume;
+  }, [volume]);
+
+  useEffect(() => {
+    mix.current.playing = playing;
+    if (!playing) {
+      fadeTo(0, FADE_OUT_MS);
+      return;
     }
-    const from = audio.volume;
-    const to = playing ? WAITING_VOLUME : 0;
-    const startedAt = Date.now();
+    begin();
+    // Until the page has been used the browser refuses: the first press starts it
+    const retry = () => {
+      if (audioRef.current?.paused) begin();
+    };
+    window.addEventListener("pointerdown", retry);
+    window.addEventListener("keydown", retry);
+    return () => {
+      window.removeEventListener("pointerdown", retry);
+      window.removeEventListener("keydown", retry);
+    };
+  }, [playing, begin, fadeTo]);
+
+  useEffect(() => {
     const timer = setInterval(() => {
-      const t = Math.min(1, (Date.now() - startedAt) / FADE_MS);
-      audio.volume = from + (to - from) * t;
-      if (t < 1) return;
-      clearInterval(timer);
-      if (!playing) audio.pause();
+      const audio = audioRef.current;
+      const m = mix.current;
+      if (!audio) return;
+      const t = Math.min(1, (Date.now() - m.at) / m.ms);
+      m.gain = m.from + (m.to - m.from) * t;
+      // The last seconds of the track fade out; onEnded starts it again
+      if (m.playing && m.to === 1 && audio.duration - audio.currentTime < END_FADE_S) fadeTo(0, END_FADE_S * 1000);
+      if (!m.playing && t >= 1 && !audio.paused) audio.pause();
+      audio.volume = Math.min(1, Math.max(0, m.gain * m.volume));
     }, 50);
     return () => clearInterval(timer);
-  }, [playing]);
-  return <audio ref={audioRef} src={src} loop preload="auto" />;
+  }, [fadeTo]);
+
+  return (
+    <audio
+      ref={audioRef}
+      src={WAITING_MUSIC}
+      preload="auto"
+      onEnded={() => {
+        if (!audioRef.current) return;
+        audioRef.current.currentTime = 0;
+        begin();
+      }}
+    />
+  );
 }
 
 export default function MusicPlayer({
@@ -60,7 +137,6 @@ export default function MusicPlayer({
   history,
   generationStatus,
   generationProgress = 0,
-  waiting = false,
   onStarted,
   onSongEnd,
 }: MusicPlayerProps) {
@@ -72,6 +148,7 @@ export default function MusicPlayer({
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const waitingVolume = useSyncExternalStore(subscribeVolume, readVolume, () => DEFAULT_VOLUME);
 
   useEffect(() => {
     if (currentSong && audioRef.current) {
@@ -89,7 +166,7 @@ export default function MusicPlayer({
 
   return (
     <div className="space-y-6">
-      {WAITING_MUSIC && <WaitingMusic src={WAITING_MUSIC} playing={waiting} />}
+      <WaitingMusic playing={!currentSong} volume={waitingVolume} />
       {/* Now playing */}
       <div className="rounded-2xl border border-border/60 bg-card shadow-sticker p-6 space-y-4">
         <div className="flex items-center justify-between">
@@ -185,6 +262,22 @@ export default function MusicPlayer({
             )}
           </div>
         )}
+        {/* The waiting music's volume, for this browser */}
+        <div className="flex items-center gap-3 border-t border-border/60 pt-4 text-xs text-muted-foreground">
+          <label htmlFor="waiting-volume" className="shrink-0">Waiting music</label>
+          <input
+            id="waiting-volume"
+            type="range"
+            min={0}
+            max={1}
+            step={0.05}
+            value={waitingVolume}
+            onChange={(event) => saveVolume(Number(event.target.value))}
+            className="h-1.5 w-full cursor-pointer"
+            style={{ accentColor: "hsl(var(--primary))" }}
+          />
+          <span className="w-9 shrink-0 text-right tabular-nums">{Math.round(waitingVolume * 100)}%</span>
+        </div>
       </div>
 
       {/* History */}

@@ -600,7 +600,6 @@ export default function Home() {
           history={[]}
           generationStatus={shownStatus}
           generationProgress={musicShown ? generationProgress : 0}
-          waiting={musicShown && !currentSong && generationProgress > 0}
           onStarted={songStarted}
           onSongEnd={() => {}}
         />
