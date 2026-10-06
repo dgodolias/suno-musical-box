@@ -5,14 +5,20 @@ import { insertSong } from "@/lib/db";
 const SONG_DURATION_SEC = 60;
 
 export async function POST(request: Request) {
-  if (process.env.SUNO_DISABLED === "true") {
-    return NextResponse.json({ error: "Music generation paused for ring tests" }, { status: 423 });
-  }
   const body = await request.json();
   const { sessionId, prompt, style, snapshot } = body;
 
   if (!prompt || !style) {
     return NextResponse.json({ error: "Missing prompt or style" }, { status: 400 });
+  }
+
+  if (process.env.USE_MOCK_SUNO === "true") {
+    const taskId = `mock-${crypto.randomUUID()}`;
+    if (sessionId) await insertSong({
+      sessionId, prompt, styleTag: style, sunoTaskId: taskId,
+      audioUrl: "/api/mock-audio", durationSec: 5, biometricSnapshot: snapshot || {},
+    });
+    return NextResponse.json({ taskId, mock: true });
   }
 
   const apiKey = process.env.SUNO_API_KEY;

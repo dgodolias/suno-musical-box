@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import { loadMockConfig } from "./lib/config-env";
 
 const nextConfig: NextConfig = {
   // /syncwave opens the current SyncWave design; ?mock is carried along
@@ -7,4 +8,6 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default nextConfig;
+export default async function config(): Promise<NextConfig> {
+  return { ...nextConfig, env: await loadMockConfig(process.env, process.cwd()) };
+}

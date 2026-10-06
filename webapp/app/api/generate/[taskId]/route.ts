@@ -5,10 +5,13 @@ export async function GET(
   request: Request,
   { params }: { params: Promise<{ taskId: string }> }
 ) {
-  if (process.env.SUNO_DISABLED === "true") {
-    return NextResponse.json({ error: "Music generation paused for ring tests" }, { status: 423 });
-  }
   const { taskId } = await params;
+  if (/^mock-[0-9a-f-]{36}$/.test(taskId)) {
+    return NextResponse.json({ status: "ready", audioUrl: "/api/mock-audio", duration: 5, title: "Mock audio (test tone)", mock: true });
+  }
+  if (process.env.USE_MOCK_SUNO === "true") {
+    return NextResponse.json({ error: "Live Suno polling is disabled in mock mode" }, { status: 423 });
+  }
   const apiKey = process.env.SUNO_API_KEY;
 
   if (!apiKey) {

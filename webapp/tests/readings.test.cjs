@@ -57,7 +57,7 @@ class MemoryStorage {
 
 // Exercise the real page callbacks with a deterministic clock and no browser,
 // network, database, or music-generation service.
-function pageHarness({ sunoDisabled = false, storage = new MemoryStorage(), tabStorage = new Map(), initialNow = 1_800_000_000_000 } = {}) {
+function pageHarness({ mockSuno = false, mockBiometrics = false, demo = false, storage = new MemoryStorage(), tabStorage = new Map(), initialNow = 1_800_000_000_000 } = {}) {
   let now = initialNow;
   let nextTimer = 1;
   let hookIndex = 0;
@@ -99,7 +99,7 @@ function pageHarness({ sunoDisabled = false, storage = new MemoryStorage(), tabS
         hooks[index] = { deps, cleanup: effect() };
       });
     },
-    useSyncExternalStore() { hookIndex++; return false; },
+    useSyncExternalStore() { hookIndex++; return demo; },
   };
   class Clock extends Date { static now() { return now; } }
   // The SyncWave display's side of the channel: what the page broadcast
@@ -137,7 +137,7 @@ function pageHarness({ sunoDisabled = false, storage = new MemoryStorage(), tabS
     crypto: { randomUUID: uuid },
     BroadcastChannel: TestChannel,
     sessionStorage: { getItem: (key) => tabStorage.get(key) ?? null, setItem: (key, value) => tabStorage.set(key, value), removeItem: (key) => tabStorage.delete(key) },
-    process: { env: { NEXT_PUBLIC_SUNO_DISABLED: String(sunoDisabled), NODE_ENV: "test" } },
+    process: { env: { USE_MOCK_SUNO: String(mockSuno), USE_MOCK_BIOMETRICS: String(mockBiometrics), NEXT_PUBLIC_SUNO_DISABLED: "true", NODE_ENV: "test" } },
     AbortController,
     setInterval(callback, interval) {
       const id = nextTimer++;
@@ -256,7 +256,7 @@ function pageHarness({ sunoDisabled = false, storage = new MemoryStorage(), tabS
 }
 
 test("full time series continues beyond 30 seconds and stops at explicit Stop with original timestamps", async () => {
-  const page = pageHarness({ sunoDisabled: true });
+  const page = pageHarness({ mockSuno: true });
   page.reading(1, 50);
   await page.start();
   await page.advance(1000);
@@ -279,7 +279,7 @@ test("full time series continues beyond 30 seconds and stops at explicit Stop wi
   const session = [...page.storage.sessions.values()][0];
   assert.equal(session.endedAt, endedAt);
   assert.equal(session.endAcknowledged, true);
-  assert.equal(page.requests.some((request) => request.url.startsWith("/api/generate")), false);
+  assert.equal(page.generations().length, 1);
   assert.match(page.text(), /Saved/);
 });
 
@@ -307,7 +307,7 @@ test("song-ready finishes recording after generation; snapshot stays in the firs
 });
 
 test("New Session resets session/player/genres while retaining both ring connection refs", async () => {
-  const page = pageHarness({ sunoDisabled: true });
+  const page = pageHarness({ mockSuno: true });
   await page.settle();
   page.ring(1).onConnectionChange(1, true);
   page.ring(2).onConnectionChange(2, true);
@@ -339,7 +339,7 @@ test("New Session resets session/player/genres while retaining both ring connect
 });
 
 test("offline samples survive New Session and retain their original parent identity", async () => {
-  const page = pageHarness({ sunoDisabled: true });
+  const page = pageHarness({ mockSuno: true });
   page.uploadResponses.push({ ok: false, status: 503 });
   await page.start();
   page.reading(1, 70);
@@ -384,7 +384,7 @@ test("reload restores the active recording and durable pending samples without r
 });
 
 test("samples arriving during upload retain their own acknowledgement", async () => {
-  const page = pageHarness({ sunoDisabled: true });
+  const page = pageHarness({ mockSuno: true });
   let finish;
   page.uploadResponses.push(new Promise((resolve) => { finish = resolve; }));
   await page.start();
@@ -401,7 +401,7 @@ test("samples arriving during upload retain their own acknowledgement", async ()
 });
 
 test("hung uploads abort and retry the same retained IDs after cooldown", async () => {
-  const page = pageHarness({ sunoDisabled: true });
+  const page = pageHarness({ mockSuno: true });
   page.uploadResponses.push(new Promise(() => {}));
   await page.start();
   page.reading(1, 70);
@@ -452,7 +452,7 @@ test("late generation submission cannot start polling after Stop", async () => {
 });
 
 test("storage failures show unsaved data, retain samples for retry, and block reset until the end is durable", async () => {
-  const page = pageHarness({ sunoDisabled: true });
+  const page = pageHarness({ mockSuno: true });
   await page.start();
   page.storage.failWrites = true;
   page.reading(1, 75);
@@ -488,25 +488,48 @@ test("server pause stops polling while full recording continues", async () => {
   await page.advance(70000);
   assert.equal(page.requests.filter((request) => request.url === "/api/generate/paused").length, 1);
   assert.equal(page.session().isActive, true);
-  assert.equal(page.player().generationStatus, "Music generation paused for ring tests");
+  assert.equal(page.player().generationStatus, "Music configuration changed. Start a new session after reloading.");
   assert.equal(page.player().generationProgress, 0);
 });
 
-test("both disabled Suno routes return 423 before request parsing or external side effects", async () => {
-  const forbidden = () => { throw new Error("Disabled route side effect"); };
+test("mock Suno generates local audio without a key or external fetch; live flags ignore the obsolete pause", async () => {
+  const forbidden = () => { throw new Error("Unexpected external side effect"); };
+  const saved = [];
   const dependencies = {
     "next/server": { NextResponse: { json: (body, options = {}) => ({ body, status: options.status ?? 200 }) } },
-    "@/lib/db": { insertSong: forbidden, updateSongAudio: forbidden },
+    "@/lib/db": { insertSong: async (song) => saved.push(song), updateSongAudio: forbidden },
   };
-  const globals = { process: { env: { SUNO_DISABLED: "true" } }, fetch: forbidden };
+  const globals = { process: { env: { USE_MOCK_SUNO: "true", SUNO_DISABLED: "true" } }, fetch: forbidden, crypto: require("node:crypto") };
   const generate = loadModule("app/api/generate/route.ts", dependencies, globals);
   const status = loadModule("app/api/generate/[taskId]/route.ts", dependencies, globals);
-  assert.equal((await generate.POST({ json: forbidden })).status, 423);
-  assert.equal((await status.GET({}, { params: { then: forbidden } })).status, 423);
+  const result = await generate.POST({ json: async () => ({ prompt: "test", style: "jazz", sessionId: 12 }) });
+  assert.equal(result.status, 200);
+  assert.equal(saved[0].sunoTaskId, result.body.taskId);
+  const audio = await status.GET({}, { params: Promise.resolve({ taskId: result.body.taskId }) });
+  assert.equal(audio.body.audioUrl, "/api/mock-audio");
+  assert.equal(audio.body.status, "ready");
+  assert.equal((await status.GET({}, { params: Promise.resolve({ taskId: "real-task" }) })).status, 423);
+  globals.process.env.USE_MOCK_SUNO = "false";
+  // Missing input/key is reported normally, not the obsolete pause.
+  assert.equal((await generate.POST({ json: async () => ({}) })).status, 400);
+  assert.equal((await generate.POST({ json: async () => ({ prompt: "test", style: "jazz" }) })).status, 500);
+});
+
+test("config controls synthetic measurements and the independent demo still works", async () => {
+  for (const options of [{}, { mockBiometrics: true }, { demo: true }]) {
+    const page = pageHarness(options);
+    await page.start();
+    await page.advance(3000);
+    const mock = !!(options.mockBiometrics || options.demo);
+    assert.equal(page.ring(1).mockMode, mock);
+    assert.equal(page.storage.samples.size > 0, mock);
+    assert.match(page.text(), mock ? /Mock \(synthetic\)/ : /Live rings/);
+    page.unmount();
+  }
 });
 
 test("fresh callbacks during slow local session creation are retained from Start time", async () => {
-  const page = pageHarness({ sunoDisabled: true });
+  const page = pageHarness({ mockSuno: true });
   const create = page.storage.createSession.bind(page.storage);
   let finishCreate;
   page.storage.createSession = async (row) => {

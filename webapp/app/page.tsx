@@ -21,8 +21,8 @@ import type { RecordedReading, RecordingSession } from "@/lib/recording-outbox";
 
 const WINDOW_SEC = 30;
 const CURRENT_SESSION_KEY = "musical-box-current-session";
-const SUNO_DISABLED = process.env.NEXT_PUBLIC_SUNO_DISABLED === "true";
-const SUNO_PAUSED_MESSAGE = "Music generation paused for ring tests";
+const MOCK_SUNO = process.env.USE_MOCK_SUNO === "true";
+const MUSIC_CONFIG_MESSAGE = "Music configuration changed. Start a new session after reloading.";
 
 interface Song {
   taskId: string;
@@ -85,7 +85,8 @@ export default function Home() {
   const [sessionError, setSessionError] = useState("");
   const [ring1Connected, setRing1Connected] = useState(false);
   const [ring2Connected, setRing2Connected] = useState(false);
-  const mockMode = useSyncExternalStore(noopSubscribe, readMockFlag, () => false);
+  const demoMode = useSyncExternalStore(noopSubscribe, readMockFlag, () => false);
+  const mockMode = process.env.USE_MOCK_BIOMETRICS === "true" || demoMode;
   const [mockRing1Data, setMockRing1Data] = useState<RingData | null>(null);
   const [mockRing2Data, setMockRing2Data] = useState<RingData | null>(null);
   const [genre1, setGenre1] = useState<string | null>(null);
@@ -155,7 +156,7 @@ export default function Home() {
           setEndPersisted(previous.endedAt !== null);
           generatingRef.current = previous.generationAttempted;
           if (previous.endedAt === null) {
-            setGenerationStatus(SUNO_DISABLED ? SUNO_PAUSED_MESSAGE : previous.generationAttempted
+            setGenerationStatus(previous.generationAttempted
               ? "Recording resumed. Music was interrupted; stop before starting a new session."
               : "Recording biometric data...");
           }
@@ -237,7 +238,7 @@ export default function Home() {
   }, []);
 
   const pollForSong = useCallback(async (taskId: string, prompt: string, style: string, run: number) => {
-    if (SUNO_DISABLED || generationRunRef.current !== run) return;
+    if (generationRunRef.current !== run) return;
     setGenerationStatus("Generating music... Recording continues.");
     const startedAt = Date.now();
     const progressTimer = setInterval(() => {
@@ -252,7 +253,7 @@ export default function Home() {
         if (generationRunRef.current !== run) return;
         const response = await fetch(`/api/generate/${taskId}`);
         if (generationRunRef.current !== run) return;
-        if (response.status === 423) { setGenerationStatus(SUNO_PAUSED_MESSAGE); return; }
+        if (response.status === 423) { setGenerationStatus(MUSIC_CONFIG_MESSAGE); return; }
         if (!response.ok) continue;
         const data = await response.json();
         if (generationRunRef.current !== run) return;
@@ -279,7 +280,6 @@ export default function Home() {
     if (!session || session.endedAt !== null || !outbox || generatingRef.current) return;
     generatingRef.current = true;
     const run = generationRunRef.current;
-    if (SUNO_DISABLED) { setGenerationStatus(SUNO_PAUSED_MESSAGE); return; }
     try {
       // Persist before any paid request. Reload never resubmits an uncertain request.
       await outbox.updateSession(session.clientSessionId, { generationAttempted: true });
@@ -293,13 +293,13 @@ export default function Home() {
       const snapshot = p1.length >= 5 && p2.length >= 5 ? computeSnapshot(p1, p2) : null;
       const { prompt, style } = buildPrompt(session.genre1, session.genre2);
       if (generationRunRef.current !== run) return;
-      setGenerationStatus("Submitting to Suno... Recording continues.");
+      setGenerationStatus(MOCK_SUNO ? "Preparing mock audio (no credits)..." : "Submitting to Suno... Recording continues.");
       const response = await fetch("/api/generate", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sessionId: saved.serverSessionId, prompt, style, snapshot }),
       });
       if (generationRunRef.current !== run) return;
-      if (response.status === 423) { setGenerationStatus(SUNO_PAUSED_MESSAGE); return; }
+      if (response.status === 423) { setGenerationStatus(MUSIC_CONFIG_MESSAGE); return; }
       if (!response.ok) throw new Error(`Music request failed (${response.status})`);
       const data = await response.json();
       if (generationRunRef.current !== run) return;
@@ -338,7 +338,7 @@ export default function Home() {
       setEndPersisted(false);
       setElapsedSeconds(0);
       setSessionError("");
-      setGenerationStatus(SUNO_DISABLED ? SUNO_PAUSED_MESSAGE : "Recording biometric data...");
+      setGenerationStatus("Recording biometric data...");
       mockTickRef.current = 0;
       void outbox.flush();
     } catch (error) {
@@ -469,11 +469,9 @@ export default function Home() {
           </div>
         </div>
 
-        {SUNO_DISABLED && (
-          <div role="status" className="rounded-xl border border-primary/30 bg-primary/10 px-4 py-3 text-sm font-medium">
-            {SUNO_PAUSED_MESSAGE}
-          </div>
-        )}
+        <div role="status" aria-label="Application configuration" className="rounded-xl border border-primary/30 bg-primary/10 px-4 py-3 text-sm font-medium">
+          Music: {MOCK_SUNO ? "Mock (no credits)" : "Suno (live)"} &middot; Biometrics: {mockMode ? "Mock (synthetic)" : "Live rings"}
+        </div>
 
         <div role="status" aria-label="Recording storage" className="rounded-xl border border-border/60 bg-card px-4 py-3 text-sm space-y-1">
           <p className="font-medium">{isActive ? "Recording" : clientSessionId ? "Session finished" : "Session"} · {saveStatus}</p>
