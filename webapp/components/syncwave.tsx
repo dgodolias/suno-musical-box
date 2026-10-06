@@ -152,6 +152,9 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
     >
       <Waveform ratesRef={ratesRef} songRef={songRef} />
       {plan && <WaitBar plan={plan} done={ready} />}
+      <p className="absolute inset-x-0 bottom-[7vh] px-4 text-center text-[clamp(11px,0.9vw,18px)] text-muted-foreground/70">
+        Created by dimosthenisgkontolias.com
+      </p>
       {ready && (
         <div
           key="ready"
@@ -182,7 +185,7 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
         <ThemeToggle />
       </div>
       {unlinked && (
-        <p className={`${note} inset-x-0 bottom-[7vh] px-4 text-center`}>
+        <p className={`${note} inset-x-0 bottom-[3vh] px-4 text-center`}>
           Open the Musical Box in another tab of this browser to stream the rings.
         </p>
       )}

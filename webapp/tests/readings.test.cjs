@@ -633,6 +633,9 @@ test("the SyncWave display hears of the wait from Start, that the song is ready,
   assert.deepEqual(page.broadcasts.at(-1).plan, { startedAt, expectedMs: 55000 });
   await page.advance(6000);
   assert.equal(page.player().currentSong.taskId, "song");
+  // The note forms as the music starts, not before
+  assert.equal(page.broadcasts.at(-1).song, false);
+  page.player().onStarted();
   assert.equal(page.broadcasts.at(-1).song, true);
   await page.next();
   assert.equal(page.player().currentSong, null);
@@ -657,4 +660,29 @@ test("the display's wait ends with Stop, or when no song is coming", async () =>
   assert.equal(page.generations().length, 1);
   assert.equal(page.broadcasts.at(-1).plan, null);
   page.unmount();
+});
+
+test("a song that cannot start playing still turns the display into its note, unless a new session began", async () => {
+  const page = pageHarness();
+  page.generationResponses.push({ ok: true, json: async () => ({ taskId: "song" }) });
+  page.pollResponses.push({ ok: true, json: async () => ({ status: "ready", audioUrl: "https://test.invalid/song.mp3" }) });
+  await page.start();
+  for (let i = 0; i < 5; i++) { page.reading(1, 70); page.reading(2, 80); }
+  await page.advance(31000);
+  assert.equal(page.player().currentSong.taskId, "song");
+  assert.equal(page.broadcasts.at(-1).song, false);
+  await page.advance(8000);
+  assert.equal(page.broadcasts.at(-1).song, true);
+  // A song shown just before New Session cannot turn the next session's display
+  const again = pageHarness();
+  again.generationResponses.push({ ok: true, json: async () => ({ taskId: "song" }) });
+  again.pollResponses.push({ ok: true, json: async () => ({ status: "ready", audioUrl: "https://test.invalid/song.mp3" }) });
+  await again.start();
+  for (let i = 0; i < 5; i++) { again.reading(1, 70); again.reading(2, 80); }
+  await again.advance(31000);
+  await again.next();
+  await again.advance(8000);
+  assert.equal(again.broadcasts.at(-1).song, false);
+  page.unmount();
+  again.unmount();
 });

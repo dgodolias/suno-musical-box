@@ -31,6 +31,9 @@ const SONG_EXPECTED_SEC = 40;
 // The whole wait from Start to the song, for the bar on the SyncWave display
 const PLAN_MS = Math.max(WINDOW_SEC, MUSIC_AT_SEC + SONG_EXPECTED_SEC) * 1000;
 const POLL_MS = 3000;
+// The note forms on the SyncWave display when the song starts playing; this
+// long after the song is shown it forms anyway (sound blocked, slow network)
+const SONG_START_GRACE_MS = 8000;
 const POLL_ATTEMPTS = 100; // five minutes
 const CURRENT_SESSION_KEY = "musical-box-current-session";
 const MOCK_SUNO = process.env.USE_MOCK_SUNO === "true";
@@ -127,6 +130,12 @@ export default function Home() {
       type: "rates", rates: liveHrRef.current, plan: planRef.current, song: songReadyRef.current,
     } satisfies HeartRateMessage);
   }, []);
+  // The SyncWave display turns into the song's note as the music starts
+  const songStarted = useCallback(() => {
+    if (songReadyRef.current) return;
+    songReadyRef.current = true;
+    publishRates();
+  }, [publishRates]);
   // No song is coming any more: the display's bar goes
   const dropPlan = useCallback(() => {
     planRef.current = null;
@@ -285,10 +294,12 @@ export default function Home() {
           const windowEnd = (activeSessionRef.current?.startedAt ?? 0) + WINDOW_SEC * 1000;
           if (Date.now() < windowEnd) await new Promise((resolve) => setTimeout(resolve, windowEnd - Date.now()));
           if (generationRunRef.current !== run) return;
-          // The SyncWave display turns into the song's note
-          songReadyRef.current = true;
-          publishRates();
+          // The player starts it, and the note forms when the music does
           setCurrentSong({ taskId, audioUrl: data.audioUrl, prompt, style, number: 1 });
+          const sessionId = activeSessionRef.current?.clientSessionId;
+          setTimeout(() => {
+            if (activeSessionRef.current?.clientSessionId === sessionId) songStarted();
+          }, SONG_START_GRACE_MS);
           setGenerationStatus("");
           setGenerationProgress(100);
           await finishSession();
@@ -305,7 +316,7 @@ export default function Home() {
         if (!songReadyRef.current) dropPlan();
       }
     }
-  }, [finishSession, publishRates, dropPlan]);
+  }, [finishSession, songStarted, dropPlan]);
 
   const generateSong = useCallback(async () => {
     const session = activeSessionRef.current;
@@ -464,12 +475,20 @@ export default function Home() {
       <div className="relative mx-auto max-w-2xl px-4 py-10 space-y-8">
         {/* Brand bar */}
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            {/* Same as educoach-platform's <Logo showIcon />: logo-v3 + text wordmark */}
-            <Image src="/brand/logo.png" alt="" width={36} height={36} priority className="rounded-lg" />
-            <span className="font-display text-2xl font-bold tracking-tight">
-              Edu<span className="text-primary">Coach</span>
-            </span>
+          <div className="space-y-1">
+            <div className="flex items-center gap-2.5">
+              {/* Same as educoach-platform's <Logo showIcon />: logo-v3 + text wordmark */}
+              <Image src="/brand/logo.png" alt="" width={36} height={36} priority className="rounded-lg" />
+              <span className="font-display text-2xl font-bold tracking-tight">
+                Edu<span className="text-primary">Coach</span>
+              </span>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Created by{" "}
+              <a href="https://dimosthenisgkontolias.com" target="_blank" rel="noopener noreferrer" className="hover:text-foreground hover:underline">
+                dimosthenisgkontolias.com
+              </a>
+            </p>
           </div>
           <div className="flex items-center gap-2">
             {/* Opens in a tab of its own (the same one each time); drag it out onto a TV */}
@@ -585,6 +604,8 @@ export default function Home() {
           history={[]}
           generationStatus={shownStatus}
           generationProgress={musicShown ? generationProgress : 0}
+          waiting={musicShown && !currentSong && generationProgress > 0}
+          onStarted={songStarted}
           onSongEnd={() => {}}
         />
 

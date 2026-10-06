@@ -18,7 +18,41 @@ interface MusicPlayerProps {
   history: Song[];
   generationStatus: string;
   generationProgress?: number;
+  waiting?: boolean; // the song is on its way, after the recording window
+  onStarted?: () => void; // the song has started playing, or cannot
   onSongEnd?: () => void;
+}
+
+// Quiet music on a loop while the song is on its way, from public/; none until
+// one of the three Suno takes is chosen
+const WAITING_MUSIC: string | null = null;
+const WAITING_VOLUME = 0.25;
+const FADE_MS = 1500;
+
+// Fades in while `playing`, and out (then pauses) as the song takes over. The
+// fade follows the clock, so a background tab's slow timers still finish it.
+function WaitingMusic({ src, playing }: { src: string; playing: boolean }) {
+  const audioRef = useRef<HTMLAudioElement>(null);
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || (!playing && audio.paused)) return;
+    if (playing && audio.paused) {
+      audio.volume = 0;
+      audio.play().catch(() => {});
+    }
+    const from = audio.volume;
+    const to = playing ? WAITING_VOLUME : 0;
+    const startedAt = Date.now();
+    const timer = setInterval(() => {
+      const t = Math.min(1, (Date.now() - startedAt) / FADE_MS);
+      audio.volume = from + (to - from) * t;
+      if (t < 1) return;
+      clearInterval(timer);
+      if (!playing) audio.pause();
+    }, 50);
+    return () => clearInterval(timer);
+  }, [playing]);
+  return <audio ref={audioRef} src={src} loop preload="auto" />;
 }
 
 export default function MusicPlayer({
@@ -26,9 +60,15 @@ export default function MusicPlayer({
   history,
   generationStatus,
   generationProgress = 0,
+  waiting = false,
+  onStarted,
   onSongEnd,
 }: MusicPlayerProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
+  const onStartedRef = useRef(onStarted);
+  useEffect(() => {
+    onStartedRef.current = onStarted;
+  }, [onStarted]);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -36,7 +76,8 @@ export default function MusicPlayer({
   useEffect(() => {
     if (currentSong && audioRef.current) {
       audioRef.current.src = currentSong.audioUrl;
-      audioRef.current.play().catch(() => {});
+      // Blocked sound still lets the display move on
+      audioRef.current.play().catch(() => onStartedRef.current?.());
     }
   }, [currentSong]);
 
@@ -48,6 +89,7 @@ export default function MusicPlayer({
 
   return (
     <div className="space-y-6">
+      {WAITING_MUSIC && <WaitingMusic src={WAITING_MUSIC} playing={waiting} />}
       {/* Now playing */}
       <div className="rounded-2xl border border-border/60 bg-card shadow-sticker p-6 space-y-4">
         <div className="flex items-center justify-between">
@@ -82,6 +124,8 @@ export default function MusicPlayer({
                 setDuration(audioRef.current?.duration || 0)
               }
               onPlay={() => setIsPlaying(true)}
+              onPlaying={() => onStartedRef.current?.()}
+              onError={() => onStartedRef.current?.()}
               onPause={() => setIsPlaying(false)}
               onEnded={() => {
                 setIsPlaying(false);
