@@ -306,11 +306,13 @@ export default function RingCard({
         {/* Only what needs someone to act stays in view; the running status is
             under Measurement diagnostics */}
         {!mockMode && isConnected && attention && (
-          <p role="status" className="-mt-2 text-xs text-muted-foreground">{attention}</p>
+          <p role="status" className={`-mt-2 text-xs ${waitingForContact && !passiveObservation ? "text-warning" : "text-muted-foreground"}`}>{attention}</p>
         )}
 
+        {/* Getting connected (retrying, not found, lost) is a warning; a problem
+            while connected is an error */}
         {!mockMode && diagnostics?.lastError && (
-          <p role="status" className="text-xs text-destructive">{diagnostics.lastError}</p>
+          <p role="status" className={`text-xs ${state === "connected" ? "text-destructive" : "text-warning"}`}>{diagnostics.lastError}</p>
         )}
 
         <GenrePicker value={genre} onChange={onGenreChange} />
