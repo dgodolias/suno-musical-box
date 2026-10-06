@@ -2,9 +2,7 @@
 
 import { useEffect, useRef, useState, type RefObject } from "react";
 import ThemeToggle from "@/components/theme-toggle";
-import WaveformV1 from "@/components/waveform-v1";
-import WaveformV2 from "@/components/waveform-v2";
-import WaveformV3 from "@/components/waveform-v3";
+import Waveform from "@/components/waveform";
 import type { Replay } from "@/lib/db";
 import {
   HEART_RATE_CHANNEL,
@@ -12,18 +10,10 @@ import {
   type LiveHeartRates,
 } from "@/lib/heart-rate-channel";
 
-// The designs: v1 draws a ribbon of strands per ring, v2 one wave per ring
-// mirrored around a shared axis, v3 gives v2 depth and shows each BPM
-const WAVES = { v1: WaveformV1, v2: WaveformV2, v3: WaveformV3 };
-// Only v3 follows the colour mode; v1 and v2 are drawn in light for the night sky
-const THEMED: Record<string, boolean> = { v3: true };
-const COSMIC =
-  "radial-gradient(60% 40% at 50% 54%, hsl(262 70% 30% / 0.35), transparent 70%), " +
-  "radial-gradient(130% 100% at 50% 54%, hsl(256 42% 12%), hsl(255 50% 4%) 75%)";
+// The page's colour mode, with a faint glow along the waves
 const BACKDROP =
   "radial-gradient(60% 40% at 50% 50%, hsl(var(--syncwave-glow)), transparent 70%), " +
   "radial-gradient(130% 100% at 50% 50%, hsl(var(--syncwave-centre)), hsl(var(--syncwave-edge)) 75%)";
-export type SyncWaveVersion = keyof typeof WAVES;
 
 // Plays a recorded session back in real time, on a loop
 function startReplay(replay: Replay, ratesRef: RefObject<LiveHeartRates>) {
@@ -49,16 +39,13 @@ function startReplay(replay: Replay, ratesRef: RefObject<LiveHeartRates>) {
 // Full-screen display for a TV: only the waves, fed by the Musical Box page
 // open in another window of the same browser. Double-click for full screen.
 // With `replay` (?mock) it plays a recorded session instead.
-export default function SyncWave({ version, replay }: { version: SyncWaveVersion; replay?: Replay | null }) {
-  const Waveform = WAVES[version];
-  const themed = THEMED[version] ?? false;
+export default function SyncWave({ replay }: { replay?: Replay | null }) {
   const ratesRef = useRef<LiveHeartRates>([null, null]);
   const [unlinked, setUnlinked] = useState(false);
   const [awake, setAwake] = useState(false);
 
   // The colour mode switch shows while the mouse moves, then gets out of the way
   useEffect(() => {
-    if (!themed) return;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const wake = () => {
       setAwake(true);
@@ -70,7 +57,7 @@ export default function SyncWave({ version, replay }: { version: SyncWaveVersion
       window.removeEventListener("pointermove", wake);
       clearTimeout(timer);
     };
-  }, [themed]);
+  }, []);
 
   useEffect(() => {
     if (replay !== undefined) return replay ? startReplay(replay, ratesRef) : undefined;
@@ -95,27 +82,22 @@ export default function SyncWave({ version, replay }: { version: SyncWaveVersion
     else document.documentElement.requestFullscreen().catch(() => {});
   };
 
-  const note = `absolute text-[clamp(13px,1.1vw,22px)] animate-in fade-in duration-700 ${
-    themed ? "text-muted-foreground" : "text-[hsl(255_25%_72%)]"
-  }`;
+  const note = "absolute text-[clamp(13px,1.1vw,22px)] text-muted-foreground animate-in fade-in duration-700";
   return (
     <main
       onDoubleClick={toggleFullscreen}
       className="fixed inset-0 overflow-hidden select-none"
-      // The EduCoach night sky, or the page's colour mode, with a faint glow along the waves
-      style={{ background: themed ? BACKDROP : COSMIC }}
+      style={{ background: BACKDROP }}
     >
       <Waveform ratesRef={ratesRef} />
-      {themed && (
-        <div
-          onDoubleClick={(event) => event.stopPropagation()}
-          className={`absolute top-[3vh] right-[3vw] transition-opacity duration-500 ${
-            awake ? "opacity-100" : "pointer-events-none opacity-0"
-          }`}
-        >
-          <ThemeToggle />
-        </div>
-      )}
+      <div
+        onDoubleClick={(event) => event.stopPropagation()}
+        className={`absolute top-[3vh] right-[3vw] transition-opacity duration-500 ${
+          awake ? "opacity-100" : "pointer-events-none opacity-0"
+        }`}
+      >
+        <ThemeToggle />
+      </div>
       {unlinked && (
         <p className={`${note} inset-x-0 bottom-[7vh] px-4 text-center`}>
           Open the Musical Box in another window of this browser to stream the rings.

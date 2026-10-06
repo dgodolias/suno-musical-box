@@ -71,7 +71,7 @@
   --ring: 248 83% 66%;
   --radius: 0.5rem;
   --sticker-muted: rgba(15, 23, 42, 0.08);
-  /* SyncWave v3 backdrop: centre, edges, and the glow along the waves */
+  /* SyncWave backdrop: centre, edges, and the glow along the waves */
   --syncwave-centre: 35 30% 98%;
   --syncwave-edge: 35 20% 91%;
   --syncwave-glow: 248 73% 68% / 0.12;

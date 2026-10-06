@@ -199,20 +199,20 @@ interface Wave {
   figure: WebGLTexture | null;
 }
 
-// v2 with depth. One wave per heart on either side of a shared axis, red above
-// for Person 1 and blue below for Person 2, but each is now a range of ridges:
-// the live one in front and, behind it, the same wave a moment earlier each,
-// smaller and dimmer with distance. A ridge has a solid flank lit from the
-// left, so the range reads as a landscape; the ridges trail the way the wave
-// is travelling, and the BPM stands among them as a figure of light.
-// The meaning is v2's, except that both always travel right: a faster heart
-// packs more, steeper and taller bells and travels faster than the slower one;
-// as the rates converge the ranges close in on the axis, turn pink and fall
-// into step, until one is the mirror image of the other, and bells that face
-// each other light the space between them.
+// One wave per heart on either side of a shared axis, red above for Person 1
+// and blue below for Person 2, each a range of ridges: the live one in front
+// and, behind it, the same wave a moment earlier each, smaller and dimmer with
+// distance. A ridge has a solid flank lit from the left, so the range reads as
+// a landscape; the ridges trail the way the wave is travelling, and the BPM
+// stands among them as a figure of light.
+// Both always travel right: a faster heart packs more, steeper and taller bells
+// and travels faster than the slower one; as the rates converge the ranges
+// close in on the axis, turn pink and fall into step, until one is the mirror
+// image of the other, and bells that face each other light the space between
+// them.
 // It follows the page's colour mode: light paints the ridges in ink on the
 // page, dark and cosmic draw them in light.
-export default function WaveformV3({ ratesRef }: { ratesRef: RefObject<LiveHeartRates> }) {
+export default function Waveform({ ratesRef }: { ratesRef: RefObject<LiveHeartRates> }) {
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
