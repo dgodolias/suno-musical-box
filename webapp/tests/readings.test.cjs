@@ -292,7 +292,7 @@ test("song-ready finishes recording after generation; snapshot stays in the firs
   for (let i = 0; i < 5; i++) { page.reading(1, 70); page.reading(2, 80); }
   await page.advance(21000);
   page.reading(1, 150);
-  await page.advance(18000);
+  await page.advance(8000);
   page.reading(2, 160);
   await page.advance(1000);
   assert.equal(page.session().isActive, false);
@@ -301,7 +301,7 @@ test("song-ready finishes recording after generation; snapshot stays in the firs
   assert.equal(page.generations()[0].body.snapshot.person1.avgHr, 70);
   assert.equal(page.generations()[0].body.snapshot.person2.avgHr, 80);
   const session = [...page.storage.sessions.values()][0];
-  assert.equal(session.endedAt - session.startedAt, 40000);
+  assert.equal(session.endedAt - session.startedAt, 30000);
   assert.equal([...page.storage.samples.values()].length, 12);
   assert.equal(session.acknowledgedCount, 12);
 });
@@ -319,7 +319,9 @@ test("music is requested at 20 s but shown from 30 s, with its bar already under
   assert.equal(page.player().generationStatus, "Recording biometric data...");
   assert.equal(page.session().status, "Recording biometric data...");
   await page.advance(10000);
-  assert.ok(page.player().generationProgress >= 8, `progress ${page.player().generationProgress}`);
+  // 11 s after the request, against an expected 24 s
+  assert.ok(page.player().generationProgress >= 40, `progress ${page.player().generationProgress}`);
+  assert.ok(page.player().generationProgress <= 45, `progress ${page.player().generationProgress}`);
   assert.equal(page.player().generationStatus, "Generating music... Recording continues.");
   assert.equal(page.session().collectSeconds, 30);
 });
@@ -329,10 +331,26 @@ test("a song ready before 30 s still records the whole window", async () => {
   page.generationResponses.push({ ok: true, json: async () => ({ taskId: "quick" }) });
   page.pollResponses.push({ ok: true, json: async () => ({ status: "ready", audioUrl: "https://test.invalid/quick.mp3" }) });
   await page.start();
-  await page.advance(35000);
+  await page.advance(25000);
+  assert.equal(page.requests.filter((request) => request.url === "/api/generate/quick").length, 1);
+  assert.equal(page.player().currentSong, null);
+  assert.equal(page.session().isActive, true);
+  await page.advance(10000);
   assert.equal(page.player().currentSong.taskId, "quick");
   const session = [...page.storage.sessions.values()][0];
-  assert.ok(session.endedAt - session.startedAt >= 30000, `ended after ${session.endedAt - session.startedAt} ms`);
+  assert.equal(session.endedAt - session.startedAt, 30000);
+});
+
+test("the music bar follows the measured Suno time and keeps creeping if it runs late", async () => {
+  const page = pageHarness();
+  page.generationResponses.push({ ok: true, json: async () => ({ taskId: "slow" }) });
+  await page.start();
+  await page.advance(44000);
+  // 24 s after the request: the expected time
+  assert.equal(page.player().generationProgress, 90);
+  await page.advance(60000);
+  assert.ok(page.player().generationProgress > 90 && page.player().generationProgress <= 99);
+  assert.ok(page.requests.filter((request) => request.url === "/api/generate/slow").length >= 25);
 });
 
 test("New Session resets session/player/genres while retaining both ring connection refs", async () => {

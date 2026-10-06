@@ -24,6 +24,11 @@ const WINDOW_SEC = 30;
 // the page keeps showing the recording until WINDOW_SEC: by the time the music
 // bar appears, part of the wait has already gone by
 const MUSIC_AT_SEC = 20;
+// Suno (chirp-hawk) had the first track ready 10-20 s after the request on
+// 2026-10-06; the bar reaches 90% at this point, then creeps towards 99%
+const SONG_EXPECTED_SEC = 24;
+const POLL_MS = 3000;
+const POLL_ATTEMPTS = 100; // five minutes
 const CURRENT_SESSION_KEY = "musical-box-current-session";
 const MOCK_SUNO = process.env.USE_MOCK_SUNO === "true";
 const MUSIC_CONFIG_MESSAGE = "Music configuration changed. Start a new session after reloading.";
@@ -248,12 +253,13 @@ export default function Home() {
       if (generationRunRef.current !== run) { clearInterval(progressTimer); return; }
       // Counted from the request, so the bar is already under way when it appears
       const elapsed = (Date.now() - requestedAt) / 1000;
-      const progress = elapsed <= 108 ? elapsed / 108 * 90 : 90 + 9 * (elapsed - 108) / (elapsed - 78);
+      const late = elapsed - SONG_EXPECTED_SEC;
+      const progress = late <= 0 ? (elapsed / SONG_EXPECTED_SEC) * 90 : 90 + (9 * late) / (late + 10);
       setGenerationProgress(Math.min(99, Math.round(progress)));
     }, 500);
     try {
-      for (let attempt = 0; attempt < 30; attempt++) {
-        await new Promise((resolve) => setTimeout(resolve, 10000));
+      for (let attempt = 0; attempt < POLL_ATTEMPTS; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, POLL_MS));
         if (generationRunRef.current !== run) return;
         const response = await fetch(`/api/generate/${taskId}`);
         if (generationRunRef.current !== run) return;
