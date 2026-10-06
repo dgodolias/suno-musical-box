@@ -71,6 +71,10 @@
   --ring: 248 83% 66%;
   --radius: 0.5rem;
   --sticker-muted: rgba(15, 23, 42, 0.08);
+  /* SyncWave v3 backdrop: centre, edges, and the glow along the waves */
+  --syncwave-centre: 35 30% 98%;
+  --syncwave-edge: 35 20% 91%;
+  --syncwave-glow: 248 73% 68% / 0.12;
 }
 
 /* Dark and "Κοσμικό" (midnight) themes, same values as the platform. */
@@ -99,6 +103,9 @@
   --input: 248 15% 18%;
   --ring: 248 82% 72%;
   --sticker-muted: rgba(0, 0, 0, 0.45);
+  --syncwave-centre: 248 18% 8%;
+  --syncwave-edge: 248 20% 3%;
+  --syncwave-glow: 248 82% 72% / 0.1;
 }
 
 .midnight {
@@ -126,6 +133,9 @@
   --input: 255 25% 28%;
   --ring: 248 80% 72%;
   --sticker-muted: rgba(0, 0, 0, 0.35);
+  --syncwave-centre: 256 42% 12%;
+  --syncwave-edge: 255 50% 4%;
+  --syncwave-glow: 262 70% 30% / 0.35;
 }
 
 /* The house "sticker": hard offset shadow, no blur — same treatment as the
