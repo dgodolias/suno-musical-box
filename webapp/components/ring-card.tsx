@@ -71,7 +71,7 @@ export default function RingCard({
     const ring = new RingConnection(personId);
     ring.onStateChange = (s) => {
       setState(s);
-      if (s === "connected") setName(ring.name);
+      setName(ring.device ? ring.name : "");
       onConnectionChangeRef.current?.(personId, s === "connected");
     };
     ring.onData = (d) => {
@@ -88,6 +88,7 @@ export default function RingCard({
     };
     ringRef.current = ring;
     if (connectionRef) connectionRef.current = ring;
+    void ring.restoreSelectedDevice();
 
     return () => {
       ring.onStateChange = () => {};
@@ -110,12 +111,13 @@ export default function RingCard({
   }, [state, mockMode]);
 
   const handleScan = useCallback(() => {
-    ringRef.current?.scan();
+    const ring = ringRef.current;
+    if (ring?.device) void ring.connect();
+    else void ring?.scan();
   }, []);
 
   const handleDisconnect = useCallback(() => {
     void ringRef.current?.disconnect();
-    setName("");
   }, []);
 
   const handleRetry = async () => {
@@ -322,15 +324,23 @@ export default function RingCard({
             </Button>
           </div>
         ) : (
-          <Button
-            variant="3d-secondary"
-            className="h-10 w-full"
-            onClick={handleScan}
-            disabled={isLoading}
-          >
-            <Bluetooth />
-            {isLoading ? "Searching..." : "Connect ring"}
-          </Button>
+          <div className="space-y-2">
+            <Button
+              variant="3d-secondary"
+              className="h-10 w-full"
+              onClick={handleScan}
+              disabled={isLoading}
+            >
+              <Bluetooth />
+              {state === "scanning" ? "Choose ring in Chrome…" : state === "connecting" ? "Connecting…" : name ? `Reconnect ${name}` : "Connect ring"}
+            </Button>
+            {(state === "connecting" || diagnostics?.lastError?.startsWith("Connection interrupted. Reconnecting")) && (
+              <Button variant="ghost" size="sm" onClick={handleDisconnect}>Cancel connection</Button>
+            )}
+            {!isLoading && name && (
+              <Button variant="ghost" size="sm" onClick={() => { void ringRef.current?.scan(); }}>Choose another ring</Button>
+            )}
+          </div>
         )}
 
         {!mockMode && diagnostics && (

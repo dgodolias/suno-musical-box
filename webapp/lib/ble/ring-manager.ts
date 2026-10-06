@@ -75,6 +75,8 @@ const MAX_AUTOMATIC_RECOVERIES = 2;
 const DEBUG_EVENT_LIMIT = 200;
 const MODE_SWITCH_QUIET_MS = 2_000;
 const DISCONNECT_TIMEOUT_MS = 3_000;
+const CONNECTION_TIMEOUT_MS = 20_000;
+const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000];
 const REALTIME_CAPTURE_TIMEOUT_MS = 90_000;
 const CONTACT_RETRY_MS = 3_000;
 const BATTERY_REFRESH_MS = 60_000;
@@ -141,6 +143,9 @@ export class RingConnection {
   private writeQueue: Promise<void> = Promise.resolve();
   private connecting: Promise<boolean> | null = null;
   private connectingGeneration = 0;
+  private connectionWanted = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempts = 0;
   private closing: Promise<void> | null = null;
   private continuePending = false;
   private recoveryPending = false;
@@ -254,7 +259,43 @@ export class RingConnection {
     this.device?.removeEventListener("gattserverdisconnected", this.handleDisconnected);
   }
 
+  private cancelReconnect() {
+    if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
+
+  private scheduleReconnect() {
+    if (!this.connectionWanted || this.closing || !this.device || this.reconnectTimer !== null) return;
+    const delay = RECONNECT_DELAYS_MS[this.reconnectAttempts];
+    if (delay === undefined) return;
+    this.reconnectAttempts++;
+    this.record("event", `Automatic reconnect ${this.reconnectAttempts}/${RECONNECT_DELAYS_MS.length} in ${delay}ms`);
+    this.diagnostics.lastError = `Connection interrupted. Reconnecting (${this.reconnectAttempts}/${RECONNECT_DELAYS_MS.length})…`;
+    this.emitDiagnostics();
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.connectionWanted && !this.closing) void this.connect(true);
+    }, delay);
+  }
+
+  /** Restore permission only; never start sensors just because the page loaded. */
+  async restoreSelectedDevice(): Promise<void> {
+    const generation = this.generation;
+    try {
+      const id = localStorage.getItem(`musical-box-ring-${this.personId}`);
+      if (!id || !navigator.bluetooth?.getDevices) return;
+      const devices = await navigator.bluetooth.getDevices();
+      if (generation !== this.generation || this.state !== "disconnected" || this.device) return;
+      this.device = devices.find((device) => device.id === id) ?? null;
+      this.setState(this.state);
+    } catch (error) {
+      this.record("event", `Saved ring unavailable: ${errorMessage(error)}`);
+    }
+  }
+
   private handleDisconnected = () => {
+    // Optical diagnostics deliberately require manual recovery after a failure.
+    if (this.opticalActive) this.connectionWanted = false;
     this.controlGeneration++;
     if (this.opticalActive) {
       this.opticalGeneration++;
@@ -271,11 +312,14 @@ export class RingConnection {
     this.resetData();
     this.setState("disconnected");
     this.fail("Bluetooth connection lost. Reconnect the ring to resume measurements.");
+    this.writeQueue = Promise.resolve();
+    this.scheduleReconnect();
   };
 
   async scan(): Promise<boolean> {
     if (this.closing || this.state === "scanning" || this.state === "connecting") return false;
     if (this.state === "connected") return true;
+    this.cancelReconnect();
     if (!navigator.bluetooth) {
       this.fail("Web Bluetooth is not supported. Use Chrome or Edge.");
       return false;
@@ -292,6 +336,11 @@ export class RingConnection {
       });
       if (generation !== this.generation) return false;
       this.device = device;
+      try {
+        localStorage.setItem(`musical-box-ring-${this.personId}`, device.id);
+      } catch (error) {
+        this.record("event", `Could not remember ring: ${errorMessage(error)}`);
+      }
       return await this.connect();
     } catch (error) {
       if (generation !== this.generation) return false;
@@ -302,8 +351,11 @@ export class RingConnection {
     }
   }
 
-  connect(): Promise<boolean> {
+  connect(automatic = false): Promise<boolean> {
     if (this.closing) return Promise.resolve(false);
+    this.cancelReconnect();
+    this.connectionWanted = true;
+    if (!automatic) this.reconnectAttempts = 0;
     if (this.state === "connected") return Promise.resolve(true);
     if (this.connecting && this.connectingGeneration === this.generation) return this.connecting;
     const previous = this.connecting;
@@ -323,6 +375,7 @@ export class RingConnection {
   private async connectDevice(): Promise<boolean> {
     const device = this.device;
     if (!device?.gatt) return false;
+    const gatt = device.gatt;
     const generation = ++this.generation;
     this.connectingGeneration = generation;
     this.stopWatchdog();
@@ -334,41 +387,71 @@ export class RingConnection {
     this.emitDiagnostics();
     this.setState("connecting");
     device.addEventListener("gattserverdisconnected", this.handleDisconnected);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const setup = async () => {
+      try {
+        this.record("event", "Connecting GATT");
+        const server = await gatt.connect();
+        if (generation !== this.generation) {
+          if (this.state === "disconnected") server.disconnect();
+          return false;
+        }
+        this.server = server;
+        this.record("event", "Discovering ring service and characteristics");
+        const service = await server.getPrimaryService(COLMI_SERVICE_UUID);
+        if (generation !== this.generation) return false;
+        const txChar = await service.getCharacteristic(COLMI_TX_UUID);
+        if (generation !== this.generation) return false;
+        const rxChar = await service.getCharacteristic(COLMI_RX_UUID);
+        if (generation !== this.generation) return false;
+        this.txChar = txChar;
+        this.rxChar = rxChar;
+        txChar.addEventListener("characteristicvaluechanged", this.handleNotification);
+        await txChar.startNotifications();
+        if (generation !== this.generation) return false;
+        await this.readDeviceInfo(server, generation);
+        if (generation !== this.generation) return false;
+        this.selectVerifiedMeasurementMode();
+        this.setState("connected");
+        this.record("event", "Connected; notifications ready");
+        await this.refreshBattery(true);
+        if (generation !== this.generation) return false;
+        await this.beginMeasurement();
+        return generation === this.generation && this.state === "connected";
+      } catch (error) {
+        if (generation !== this.generation) return false;
+        this.stopWatchdog();
+        this.detachListeners();
+        this.server?.disconnect();
+        this.server = null;
+        this.rxChar = null;
+        this.txChar = null;
+        this.setState("disconnected");
+        this.fail(`Connection failed: ${errorMessage(error)}`);
+        if (!(error instanceof Error) || !/SecurityError|NotAllowedError|NotSupportedError/.test(error.name)) this.scheduleReconnect();
+        return false;
+      }
+    };
     try {
-      const server = await device.gatt.connect();
-      if (generation !== this.generation) { server.disconnect(); return false; }
-      this.server = server;
-      const service = await server.getPrimaryService(COLMI_SERVICE_UUID);
-      if (generation !== this.generation) return false;
-      const txChar = await service.getCharacteristic(COLMI_TX_UUID);
-      if (generation !== this.generation) return false;
-      const rxChar = await service.getCharacteristic(COLMI_RX_UUID);
-      if (generation !== this.generation) return false;
-      this.txChar = txChar;
-      this.rxChar = rxChar;
-      txChar.addEventListener("characteristicvaluechanged", this.handleNotification);
-      await txChar.startNotifications();
-      if (generation !== this.generation) return false;
-      await this.readDeviceInfo(server, generation);
-      if (generation !== this.generation) return false;
-      this.selectVerifiedMeasurementMode();
-      this.setState("connected");
-      this.record("event", "Connected; notifications ready");
-      await this.refreshBattery(true);
-      if (generation !== this.generation) return false;
-      await this.beginMeasurement();
-      return generation === this.generation && this.state === "connected";
-    } catch (error) {
-      if (generation !== this.generation) return false;
-      this.stopWatchdog();
-      this.detachListeners();
-      this.server?.disconnect();
-      this.server = null;
-      this.rxChar = null;
-      this.txChar = null;
-      this.setState("disconnected");
-      this.fail(`Connection failed: ${errorMessage(error)}`);
-      return false;
+      return await Promise.race([
+        setup(),
+        new Promise<false>((resolve) => {
+          timer = setTimeout(() => {
+            if (generation === this.generation) {
+              this.stopWatchdog();
+              this.closeGatt();
+              // Also cancel a native connect that has not yet resolved.
+              device.gatt?.disconnect();
+              this.resetData();
+              this.setState("disconnected");
+              this.fail("Bluetooth connection timed out. Keep the ring nearby and close QRing or other tabs using it, then reconnect.");
+            }
+            resolve(false);
+          }, CONNECTION_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timer !== null) clearTimeout(timer);
     }
   }
 
@@ -901,6 +984,8 @@ export class RingConnection {
   }
 
   disconnect(): Promise<void> {
+    this.connectionWanted = false;
+    this.cancelReconnect();
     if (this.closing) return this.closing;
     this.controlGeneration++;
     const operation = this.disconnectDevice();
@@ -950,6 +1035,7 @@ export class RingConnection {
 
   private async disconnectDevice() {
     if (this.opticalActive) await this.ensureOpticalStopped();
+    this.diagnostics.lastError = null;
     const generation = ++this.generation;
     this.stopWatchdog();
     this.detachListeners();
@@ -968,7 +1054,6 @@ export class RingConnection {
     // A native write may never settle. Close its physical connection and detach
     // the old queue so reconnect can proceed; late completions fail this token.
     this.closeGatt();
-    this.device = null;
     this.diagnostics.measurementState = "idle";
     this.emitDiagnostics();
     this.record("event", "Disconnected");
@@ -1057,6 +1142,7 @@ export class RingConnection {
       this.automaticRecoveries = 0;
       this.diagnostics.lastHeartRateAt = now;
       this.diagnostics.heartRateSamples++;
+      this.reconnectAttempts = 0;
       this.diagnostics.measurementState = "measuring";
       this.diagnostics.lastError = null;
     }

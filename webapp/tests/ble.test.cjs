@@ -111,6 +111,10 @@ function harness({ deviceInfo = false, writeWithoutResponse = true, firmware = "
   let connectionGate = null;
   let writeError = null;
   let selectionError = null;
+  let connectionFailures = 0;
+  let selectionCount = 0;
+  let connectCount = 0;
+  const storage = new Map();
   let activeWrites = 0;
   let maximumWrites = 0;
   const timers = new Map();
@@ -135,7 +139,13 @@ function harness({ deviceInfo = false, writeWithoutResponse = true, firmware = "
   rx.writeValueWithResponse = performWrite;
   const server = {
     connected: false,
-    async connect() { if (connectionGate) await connectionGate; this.connected = true; return this; },
+    async connect() {
+      connectCount++;
+      if (connectionGate) await connectionGate;
+      if (connectionFailures-- > 0) throw new Error("GATT temporarily unavailable");
+      this.connected = true;
+      return this;
+    },
     disconnect() { this.connected = false; device.emit("gattserverdisconnected"); },
     async getPrimaryService(uuid) {
       if (uuid === "device_information") {
@@ -149,6 +159,7 @@ function harness({ deviceInfo = false, writeWithoutResponse = true, firmware = "
     },
   };
   device.name = "Test ring";
+  device.id = "test-ring-id";
   device.gatt = server;
   const globals = {
     Uint8Array, DataView, ArrayBuffer, TextDecoder, Error,
@@ -157,7 +168,11 @@ function harness({ deviceInfo = false, writeWithoutResponse = true, firmware = "
     clearInterval: (id) => timers.delete(id),
     setTimeout: (fn, delay) => { const id = ++timerId; timers.set(id, { fn, delay, at: now + delay, repeat: false }); return id; },
     clearTimeout: (id) => timers.delete(id),
-    navigator: { bluetooth: { requestDevice: async () => { if (selectionError) throw selectionError; return device; } } },
+    localStorage: { getItem: (key) => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
+    navigator: { bluetooth: {
+      requestDevice: async () => { selectionCount++; if (selectionError) throw selectionError; return device; },
+      getDevices: async () => [device],
+    } },
   };
   const protocol = load(protocolCode, globals);
   const { RingConnection } = load(managerCode, globals, { "./colmi-protocol": protocol });
@@ -168,6 +183,10 @@ function harness({ deviceInfo = false, writeWithoutResponse = true, firmware = "
   return {
     ring, protocol, device, tx, server, writes, freshReadings, allData, allDiagnostics, timers,
     get maximumWrites() { return maximumWrites; },
+    get selectionCount() { return selectionCount; },
+    get connectCount() { return connectCount; },
+    storage,
+    failConnections(count) { connectionFailures = count; },
     blockWrites() { let resolve; writeGate = new Promise((done) => { resolve = done; }); return () => { writeGate = null; resolve(); }; },
     blockConnections() { let resolve; connectionGate = new Promise((done) => { resolve = done; }); return () => { connectionGate = null; resolve(); }; },
     failWrites(error) { writeError = error; },
@@ -292,6 +311,80 @@ test("ongoing zero notifications after a valid reading do not trigger CONTINUE",
   assert.equal(h.ring.diagnostics.measurementState, "stale");
 });
 
+test("saved selection restores permission without starting sensors or opening chooser", async () => {
+  const h = harness();
+  h.storage.set("musical-box-ring-1", "test-ring-id");
+  await h.ring.restoreSelectedDevice();
+  assert.equal(h.ring.device, h.device);
+  assert.equal(h.connectCount, 0);
+  assert.equal(h.selectionCount, 0);
+  assert.equal(await h.ring.connect(), true);
+  await h.ring.disconnect();
+  assert.equal(await h.ring.connect(), true);
+  assert.equal(h.selectionCount, 0);
+});
+
+test("transient initial failure retries the selected ring without a second chooser", async () => {
+  const h = harness();
+  h.failConnections(1);
+  assert.equal(await h.ring.scan(), false);
+  await h.advance(1_000);
+  assert.equal(h.ring.state, "connected");
+  assert.equal(h.connectCount, 2);
+  assert.equal(h.selectionCount, 1);
+  assert.equal(h.tx.count("characteristicvaluechanged"), 1);
+});
+
+test("unexpected loss automatically reconnects, clears old BPM and records fresh samples once", async () => {
+  const h = harness();
+  await h.ring.scan();
+  h.notify(packet(0x69, 1, 0, 73));
+  h.server.disconnect();
+  assert.equal(h.ring.data.heartRate, null);
+  await h.advance(1_000);
+  assert.equal(h.ring.state, "connected");
+  assert.equal(h.selectionCount, 1);
+  assert.equal(h.tx.count("characteristicvaluechanged"), 1);
+  h.notify(packet(0x69, 1, 0, 74));
+  assert.equal(h.freshReadings.length, 2);
+});
+
+test("unavailable ring has bounded retries and manual Disconnect cancels backoff", async () => {
+  const h = harness();
+  h.failConnections(10);
+  await h.ring.scan();
+  await h.advance(60_000);
+  assert.equal(h.connectCount, 4);
+  assert.equal(h.timers.size, 0);
+  await h.ring.connect();
+  await h.ring.disconnect();
+  await h.advance(60_000);
+  assert.equal(h.connectCount, 5);
+  assert.equal(h.timers.size, 0);
+});
+
+test("hung connect times out; a late old completion cannot disconnect a new connection", async () => {
+  const h = harness();
+  const release = h.blockConnections();
+  const first = h.ring.scan();
+  await settle();
+  await h.advance(20_000);
+  assert.equal(await first, false);
+  assert.equal(h.ring.state, "disconnected");
+  assert.match(h.ring.diagnostics.lastError, /timed out/);
+  // The old native promise remains pending while a newer attempt succeeds.
+  const originalConnect = h.server.connect;
+  h.server.connect = async function () { this.connected = true; return this; };
+  assert.equal(await h.ring.connect(), true);
+  release();
+  await settle();
+  assert.equal(h.server.connected, true);
+  assert.equal(h.ring.state, "connected");
+  assert.equal(h.tx.count("characteristicvaluechanged"), 1);
+  assert.equal(h.ring.diagnostics.startsSent, 1);
+  h.server.connect = originalConnect;
+});
+
 test("unexpected disconnect resets stale data and reconnect resumes with one listener", async () => {
   const h = harness();
   await h.ring.scan();
@@ -299,7 +392,7 @@ test("unexpected disconnect resets stale data and reconnect resumes with one lis
   h.server.disconnect();
   assert.equal(h.ring.state, "disconnected");
   assert.equal(h.ring.data.heartRate, null);
-  assert.equal(h.timers.size, 0);
+  assert.equal(h.timers.size, 1); // One bounded reconnect is scheduled.
   assert.equal(h.tx.count("characteristicvaluechanged"), 0);
   assert.equal(await h.ring.connect(), true);
   assert.equal(h.tx.count("characteristicvaluechanged"), 1);
