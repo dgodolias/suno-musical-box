@@ -23,15 +23,19 @@ import { EMPTY_SYNC_STATUS, RecordingOutbox } from "@/lib/recording-outbox";
 import type { RecordedReading, RecordingSession } from "@/lib/recording-outbox";
 
 const WINDOW_SEC = 30;
-// The music is requested this many seconds in, from the readings so far, while
-// the page keeps showing the recording until WINDOW_SEC: by the time the music
-// bar appears, part of the wait has already gone by
-const MUSIC_AT_SEC = 15;
+// The song is asked for as soon as both rings have given their first
+// measurement of the session (they go with the request), or this many seconds
+// in if one has not. The page keeps showing the recording until WINDOW_SEC, so
+// by the time the music bar appears, most of the wait has gone by
+const MUSIC_BY_SEC = 15;
+// How soon both rings usually measure after Start (they are already on)
+const FIRST_MEASUREMENT_SEC = 2;
 // A 3-minute V6 song was ready 37-40 s after the request in the 2026-10-06
 // benchmark; the music bar has slowed to about 82% by this point (placebo)
 const SONG_EXPECTED_SEC = 40;
-// The whole wait from Start to the song, for the bar on the SyncWave display
-const PLAN_MS = Math.max(WINDOW_SEC, MUSIC_AT_SEC + SONG_EXPECTED_SEC) * 1000;
+// The whole wait from Start to the song, for the bar on the SyncWave display;
+// set again from the moment the song is asked for
+const PLAN_MS = Math.max(WINDOW_SEC, FIRST_MEASUREMENT_SEC + SONG_EXPECTED_SEC) * 1000;
 const POLL_MS = 3000;
 // The note forms on the SyncWave display when the song starts playing; this
 // long after the song is shown it forms anyway (sound blocked, slow network)
@@ -127,6 +131,9 @@ export default function Home() {
   const endingSessionRef = useRef(false);
   const startingReadingsRef = useRef<{ startedAt: number; readings: RecordedReading[] } | null>(null);
   const generatingRef = useRef(false);
+  const generateSongRef = useRef<(() => Promise<void>) | null>(null);
+  // Who has given a measurement in this session (the song waits for both)
+  const firstReadingsRef = useRef(new Set<1 | 2>());
   const generationRunRef = useRef(0);
   const liveHrRef = useRef<LiveHeartRates>([null, null]);
   const planRef = useRef<SessionPlan | null>(null);
@@ -244,6 +251,9 @@ export default function Home() {
     if (session.endedAt !== null || reading.timestamp < session.startedAt) return;
     void outboxRef.current?.append(session.clientSessionId, { ...reading, sampleId: crypto.randomUUID() })
       .catch((error) => setSessionError("Could not retain measurement: " + String(error)));
+    // Both rings have measured: the song is asked for now
+    if (reading.heartRate !== null) firstReadingsRef.current.add(reading.personId);
+    if (firstReadingsRef.current.size === 2) void generateSongRef.current?.();
   }, [publishRates]);
 
   const addReading = useCallback((personId: 1 | 2, data: RingData) => {
@@ -348,14 +358,23 @@ export default function Home() {
       if (generationRunRef.current !== run) return;
       const saved = await outbox.getSession(session.clientSessionId);
       if (!saved?.serverSessionId) throw new Error("Session is still pending upload");
-      const readings = await outbox.snapshot(session.clientSessionId, session.startedAt, session.startedAt + MUSIC_AT_SEC * 1000);
-      const p1 = readings.filter((reading) => reading.personId === 1);
-      const p2 = readings.filter((reading) => reading.personId === 2);
-      const snapshot = p1.length >= 5 && p2.length >= 5 ? computeSnapshot(p1, p2) : null;
+      // Each person's first measurement of the session goes with the request
+      const readings = await outbox.snapshot(session.clientSessionId, session.startedAt, Date.now());
+      const first = (personId: 1 | 2) =>
+        readings.filter((reading) => reading.personId === personId && reading.heartRate !== null).slice(0, 1);
+      const p1 = first(1);
+      const p2 = first(2);
+      const snapshot = p1.length && p2.length ? computeSnapshot(p1, p2) : null;
       const { prompt, style } = buildPrompt(session.genre1, session.genre2);
       if (generationRunRef.current !== run) return;
       setGenerationStatus(MOCK_SUNO ? "Preparing mock audio (no credits)..." : "Submitting to Suno... Recording continues.");
       const requestedAt = Date.now();
+      // The display's bar now knows when the song was asked for
+      planRef.current = {
+        startedAt: session.startedAt,
+        expectedMs: Math.max(WINDOW_SEC * 1000, requestedAt - session.startedAt + SONG_EXPECTED_SEC * 1000),
+      };
+      publishRates();
       const response = await fetch("/api/generate", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sessionId: saved.serverSessionId, prompt, style, snapshot }),
@@ -373,7 +392,10 @@ export default function Home() {
         dropPlan();
       }
     }
-  }, [pollForSong, dropPlan]);
+  }, [pollForSong, dropPlan, publishRates]);
+  useEffect(() => {
+    generateSongRef.current = generateSong;
+  }, [generateSong]);
 
   const startSession = useCallback(async () => {
     const outbox = outboxRef.current;
@@ -386,6 +408,7 @@ export default function Home() {
       person1Count: 0, person2Count: 0, acknowledgedCount: 0,
     };
     startingReadingsRef.current = { startedAt: session.startedAt, readings: [] };
+    firstReadingsRef.current = new Set();
     try {
       await outbox.createSession(session);
       sessionStorage.setItem(CURRENT_SESSION_KEY, session.clientSessionId);
@@ -397,6 +420,7 @@ export default function Home() {
       for (const reading of startingReadingsRef.current.readings) {
         void outbox.append(session.clientSessionId, reading)
           .catch((error) => setSessionError("Could not retain measurement: " + String(error)));
+        if (reading.heartRate !== null) firstReadingsRef.current.add(reading.personId);
       }
       startingReadingsRef.current = null;
       generationRunRef.current++;
@@ -409,10 +433,12 @@ export default function Home() {
       setGenerationStatus("Recording biometric data...");
       mockTickRef.current = 0;
       void outbox.flush();
+      // Both rings measured while the session was being set up
+      if (firstReadingsRef.current.size === 2) void generateSong();
     } catch (error) {
       setSessionError("Could not start local recording: " + String(error));
     } finally { startingSessionRef.current = false; startingReadingsRef.current = null; }
-  }, [sync.ready, initialized, mockMode, genre1, genre2, publishRates]);
+  }, [sync.ready, initialized, mockMode, genre1, genre2, publishRates, generateSong]);
 
   const stopSession = useCallback(async () => {
     setGenerationStatus("");
@@ -478,7 +504,7 @@ export default function Home() {
       }
       const elapsed = Math.floor((Date.now() - session.startedAt) / 1000);
       setElapsedSeconds(elapsed);
-      if (elapsed >= MUSIC_AT_SEC) void generateSong();
+      if (elapsed >= MUSIC_BY_SEC) void generateSong();
     }, 1000);
     return () => clearInterval(timer);
   }, [isActive, mockMode, generateSong, recordReading]);
@@ -490,7 +516,7 @@ export default function Home() {
     : sync.pendingReadings > 0 || sync.pendingSessions > 0 ? `${sync.pendingReadings} measurements pending upload`
     : saved ? "Saved" : isActive ? "All received measurements saved" : "Ready";
   // Until the recording window ends the music stays out of sight, even though it
-  // was requested at MUSIC_AT_SEC
+  // was requested long before
   const musicShown = !isActive || elapsedSeconds >= WINDOW_SEC;
   const shownStatus = musicShown ? generationStatus : "Recording biometric data...";
   return (

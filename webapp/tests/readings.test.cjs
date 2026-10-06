@@ -287,7 +287,7 @@ test("full time series continues beyond 30 seconds and stops at explicit Stop wi
   assert.match(page.text(), /Saved/);
 });
 
-test("song-ready finishes recording after generation; snapshot stays in the first 15 seconds", async () => {
+test("song-ready finishes recording after generation; the snapshot is each person's first measurement", async () => {
   const page = pageHarness();
   page.generationResponses.push({ ok: true, json: async () => ({ taskId: "song" }) });
   page.pollResponses.push({ ok: true, json: async () => ({ status: "pending" }) });
@@ -310,21 +310,25 @@ test("song-ready finishes recording after generation; snapshot stays in the firs
   assert.equal(session.acknowledgedCount, 12);
 });
 
-test("music is requested at 15 s but shown from 30 s, with its bar already under way", async () => {
+test("music is requested at both rings' first measurement but shown from 30 s, with its bar well under way", async () => {
   const page = pageHarness();
   page.generationResponses.push({ ok: true, json: async () => ({ taskId: "early" }) });
   await page.start();
-  for (let i = 0; i < 5; i++) { page.reading(1, 70); page.reading(2, 80); }
-  await page.advance(14000);
+  page.reading(1, 70);
+  await page.settle();
+  // One ring is not enough
   assert.equal(page.generations().length, 0);
-  await page.advance(2000);
+  page.reading(2, 80);
+  await page.settle();
   assert.equal(page.generations().length, 1);
+  assert.equal(page.generations()[0].body.snapshot.person1.avgHr, 70);
+  assert.equal(page.generations()[0].body.snapshot.person2.avgHr, 80);
   assert.equal(page.player().generationProgress, 0);
   assert.equal(page.player().generationStatus, "Recording biometric data...");
   assert.equal(page.session().status, "Recording biometric data...");
-  await page.advance(15000);
-  // 16 s after the request, against an expected 40 s: still at the steady pace
-  assert.equal(page.player().generationProgress, 38);
+  await page.advance(31000);
+  // 31 s after the request, against an expected 40 s
+  assert.equal(page.player().generationProgress, 72);
   assert.equal(page.player().generationStatus, "Generating music... Recording continues.");
   assert.equal(page.session().collectSeconds, 30);
 });
@@ -628,12 +632,14 @@ test("the SyncWave display hears of the wait from Start, that the song is ready,
   page.pollResponses.push({ ok: true, json: async () => ({ status: "ready", audioUrl: "https://test.invalid/song.mp3" }) });
   await page.start();
   const startedAt = [...page.storage.sessions.values()][0].startedAt;
-  // The wait is the request time plus the measured Suno time, from the page's own timings
-  assert.deepEqual(page.broadcasts.at(-1).plan, { startedAt, expectedMs: 55000 });
+  // The wait is the usual first measurement plus the measured Suno time, from the page's own timings
+  assert.deepEqual(page.broadcasts.at(-1).plan, { startedAt, expectedMs: 42000 });
   for (let i = 0; i < 5; i++) { page.reading(1, 70); page.reading(2, 80); }
+  await page.settle();
   await page.advance(25000);
   assert.equal(page.broadcasts.at(-1).song, false);
-  assert.deepEqual(page.broadcasts.at(-1).plan, { startedAt, expectedMs: 55000 });
+  // ...then counted from the request itself, at the first measurements
+  assert.deepEqual(page.broadcasts.at(-1).plan, { startedAt, expectedMs: 40000 });
   await page.advance(6000);
   assert.equal(page.player().currentSong.taskId, "song");
   // The note forms as the music starts, not before
@@ -656,10 +662,9 @@ test("the display's wait ends with Stop, or when no song is coming", async () =>
   await page.next();
   page.generationResponses.push({ ok: false, status: 500, json: async () => ({}) });
   await page.start();
-  for (let i = 0; i < 5; i++) { page.reading(1, 70); page.reading(2, 80); }
-  await page.advance(14000);
   assert.notEqual(page.broadcasts.at(-1).plan, null);
-  await page.advance(2000);
+  for (let i = 0; i < 5; i++) { page.reading(1, 70); page.reading(2, 80); }
+  await page.settle();
   assert.equal(page.generations().length, 1);
   assert.equal(page.broadcasts.at(-1).plan, null);
   page.unmount();
@@ -707,5 +712,18 @@ test("the display's waiting music hears its volume, and starts again with each N
   await reloaded.settle();
   assert.equal(reloaded.broadcasts.at(-1).round, 1);
   reloaded.unmount();
+});
+
+test("with one ring silent, the song is asked for at 15 s, without a two-person snapshot", async () => {
+  const page = pageHarness();
+  page.generationResponses.push({ ok: true, json: async () => ({ taskId: "late" }) });
+  await page.start();
+  page.reading(1, 70);
+  await page.advance(14000);
+  assert.equal(page.generations().length, 0);
+  await page.advance(1000);
+  assert.equal(page.generations().length, 1);
+  assert.equal(page.generations()[0].body.snapshot, null);
+  page.unmount();
 });
 

@@ -28,11 +28,11 @@ export async function sendSongEmail(opts: {
     body: JSON.stringify({
       sender: SENDER,
       to: [{ email: opts.to }],
-      subject: "Το τραγούδι σας από το Musical Box 🎵",
+      subject: "Your song from the Musical Box 🎵",
       htmlContent: `
-        <p>Γεια σας!</p>
-        <p>Σας στέλνουμε το τραγούδι που δημιουργήσατε στο Musical Box. Το βρίσκετε συνημμένο σε αυτό το email.</p>
-        <p>— Η ομάδα του EduCoach</p>
+        <p>Hello!</p>
+        <p>Here is the song you created at the Musical Box. You will find it attached to this email.</p>
+        <p>— The EduCoach team</p>
       `,
       attachment: [{ name: `${opts.title}.mp3`, content: audio.toString("base64") }],
     }),

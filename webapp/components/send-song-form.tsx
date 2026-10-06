@@ -39,11 +39,11 @@ export default function SendSongForm({ taskId }: { taskId: string }) {
         <div className="space-y-1">
           {sentTo.map((addr, i) => (
             <p key={`${addr}-${i}`} className="text-sm font-medium text-success">
-              ✓ Το τραγούδι στάλθηκε στο {addr}
+              ✓ Song sent to {addr}
             </p>
           ))}
           <p className="text-xs text-muted-foreground">
-            Αν δεν το δείτε σε λίγα λεπτά, κοιτάξτε και στα Ανεπιθύμητα (Spam).
+            If it has not arrived in a few minutes, check the spam folder too.
           </p>
         </div>
       )}
@@ -52,8 +52,8 @@ export default function SendSongForm({ taskId }: { taskId: string }) {
         <form onSubmit={send} className="space-y-2">
           <label htmlFor="send-song-email" className="text-sm font-medium">
             {sentTo.length > 0
-              ? "Σε ποιο άλλο email να το στείλουμε;"
-              : "Θέλετε το τραγούδι στο email σας;"}
+              ? "Which other email should we send it to?"
+              : "Would you like the song by email?"}
           </label>
           <div className="flex gap-2">
             <input
@@ -70,14 +70,14 @@ export default function SendSongForm({ taskId }: { taskId: string }) {
               className="flex-1 min-w-0 rounded-xl border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
             />
             <Button type="submit" variant="3d-primary" className="h-10 px-4" disabled={status === "sending"}>
-              {status === "sending" ? "Αποστολή..." : "Αποστολή"}
+              {status === "sending" ? "Sending..." : "Send"}
             </Button>
           </div>
           {status === "error" && (
-            <p className="text-sm text-destructive">Η αποστολή απέτυχε. Δοκιμάστε ξανά.</p>
+            <p className="text-sm text-destructive">Sending failed. Please try again.</p>
           )}
           <p className="text-xs text-muted-foreground">
-            Χρησιμοποιούμε το email σας μόνο για να σας στείλουμε το τραγούδι.
+            We use your email only to send you the song.
           </p>
         </form>
       ) : (
@@ -86,7 +86,7 @@ export default function SendSongForm({ taskId }: { taskId: string }) {
           onClick={() => setShowForm(true)}
           className="text-sm font-medium text-primary hover:text-primary/80 transition"
         >
-          ✉ Αποστολή και σε άλλο email
+          ✉ Send to another email
         </button>
       )}
     </div>
