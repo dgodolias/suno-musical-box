@@ -24,7 +24,7 @@ const WINDOW_SEC = 30;
 // The music is requested this many seconds in, from the readings so far, while
 // the page keeps showing the recording until WINDOW_SEC: by the time the music
 // bar appears, part of the wait has already gone by
-const MUSIC_AT_SEC = 20;
+const MUSIC_AT_SEC = 15;
 // A 3-minute V6 song was ready 37-40 s after the request in the 2026-10-06
 // benchmark; the music bar reaches its expected share at this point (placebo)
 const SONG_EXPECTED_SEC = 40;
@@ -120,7 +120,7 @@ export default function Home() {
   const mockTickRef = useRef(0);
   const anyConnected = mockMode || ring1Connected || ring2Connected;
 
-  // Live heart rates for the SyncWave display (/syncwave) in another window,
+  // Live heart rates for the SyncWave display (/syncwave) in another tab,
   // with the wait for the song and whether it has come
   const publishRates = useCallback(() => {
     channelRef.current?.postMessage({
@@ -472,13 +472,13 @@ export default function Home() {
             </span>
           </div>
           <div className="flex items-center gap-2">
-            {/* Opens its own window, ready to drag onto a TV */}
+            {/* Opens in a tab of its own (the same one each time); drag it out onto a TV */}
             <Button
               variant="outline"
-              onClick={() => window.open("/syncwave", "syncwave", "popup,width=1280,height=720")}
+              onClick={() => window.open("/syncwave", "syncwave")}
               className="h-10 rounded-full border-border/60 bg-card px-3.5"
               aria-label="Open SyncWave"
-              title="Open the SyncWave display in its own window"
+              title="Open the SyncWave display in a new tab"
             >
               <Tv />
               <span className="hidden sm:inline">SyncWave</span>

@@ -70,7 +70,7 @@ function WaitBar({ plan, done }: { plan: SessionPlan; done: boolean }) {
 }
 
 // Full-screen display for a TV: only the waves, fed by the Musical Box page
-// open in another window of the same browser. Double-click for full screen.
+// open in another tab of the same browser. Double-click for full screen.
 // With `replay` (?mock) it plays a recorded session instead.
 export default function SyncWave({ replay, song = false }: { replay?: Replay | null; song?: boolean }) {
   const ratesRef = useRef<LiveHeartRates>([null, null]);
@@ -183,7 +183,7 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
       </div>
       {unlinked && (
         <p className={`${note} inset-x-0 bottom-[7vh] px-4 text-center`}>
-          Open the Musical Box in another window of this browser to stream the rings.
+          Open the Musical Box in another tab of this browser to stream the rings.
         </p>
       )}
       {replay !== undefined && (

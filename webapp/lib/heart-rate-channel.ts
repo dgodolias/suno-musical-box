@@ -1,5 +1,5 @@
 // The Musical Box page sends each ring's latest heart rate to the SyncWave
-// display (/syncwave), which runs in another window of the same browser.
+// display (/syncwave), which runs in another tab of the same browser.
 
 export interface HeartRateSample {
   bpm: number;
