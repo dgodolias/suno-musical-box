@@ -76,6 +76,10 @@ const DEBUG_EVENT_LIMIT = 200;
 const MODE_SWITCH_QUIET_MS = 2_000;
 const DISCONNECT_TIMEOUT_MS = 3_000;
 const CONNECTION_TIMEOUT_MS = 20_000;
+// Chrome connects to a ring it remembers from an earlier visit (getDevices) only
+// after hearing it advertise ("no longer in range" otherwise); this long at most,
+// then it tries anyway
+const ADVERTISEMENT_WAIT_MS = 8_000;
 const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000];
 const REALTIME_CAPTURE_TIMEOUT_MS = 90_000;
 const CONTACT_RETRY_MS = 3_000;
@@ -387,6 +391,36 @@ export class RingConnection {
     return operation;
   }
 
+  /** Waits until Chrome hears the ring advertise, or ADVERTISEMENT_WAIT_MS. */
+  private async waitForAdvertisement(device: BluetoothDevice): Promise<void> {
+    if (typeof device.watchAdvertisements !== "function") return;
+    const watching = new AbortController();
+    let heard = () => {};
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      this.record("event", "Listening for the ring to advertise");
+      await new Promise<void>((resolve) => {
+        heard = () => {
+          this.record("event", "Ring heard advertising");
+          resolve();
+        };
+        device.addEventListener("advertisementreceived", heard);
+        timer = setTimeout(() => {
+          this.record("event", "Ring not heard advertising; connecting anyway");
+          resolve();
+        }, ADVERTISEMENT_WAIT_MS);
+        device.watchAdvertisements({ signal: watching.signal }).catch((error) => {
+          this.record("event", `Could not listen for advertisements: ${errorMessage(error)}`);
+          resolve();
+        });
+      });
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+      device.removeEventListener("advertisementreceived", heard);
+      watching.abort();
+    }
+  }
+
   private async connectDevice(): Promise<boolean> {
     const device = this.device;
     if (!device?.gatt) return false;
@@ -405,6 +439,8 @@ export class RingConnection {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const setup = async () => {
       try {
+        await this.waitForAdvertisement(device);
+        if (generation !== this.generation) return false;
         this.record("event", "Connecting GATT");
         const server = await gatt.connect();
         if (generation !== this.generation) {
@@ -442,7 +478,14 @@ export class RingConnection {
         this.rxChar = null;
         this.txChar = null;
         this.setState("disconnected");
-        this.fail(`Connection failed: ${errorMessage(error)}`);
+        const reason = errorMessage(error);
+        if (/range/i.test(reason)) {
+          // Chrome's own words stay in the report
+          this.record("event", `Connection failed: ${reason}`);
+          this.fail(`${this.ringName ?? "The ring"} is not nearby or is connected elsewhere (QRing, another tab). Keep it close, then press Connect${this.ringName ? ` ${this.ringName}` : " ring"} again.`);
+        } else {
+          this.fail(`Connection failed: ${reason}`);
+        }
         if (!(error instanceof Error) || !/SecurityError|NotAllowedError|NotSupportedError/.test(error.name)) this.scheduleReconnect();
         return false;
       }

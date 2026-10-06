@@ -163,7 +163,7 @@ function harness({ deviceInfo = false, writeWithoutResponse = true, firmware = "
   device.id = "test-ring-id";
   device.gatt = server;
   const globals = {
-    Uint8Array, DataView, ArrayBuffer, TextDecoder, Error,
+    Uint8Array, DataView, ArrayBuffer, TextDecoder, Error, AbortController,
     Date: class extends Date { constructor(...args) { super(...(args.length ? args : [now])); } static now() { return now; } },
     setInterval: (fn, delay) => { const id = ++timerId; timers.set(id, { fn, delay, at: now + delay, repeat: true }); return id; },
     clearInterval: (id) => timers.delete(id),
@@ -1427,3 +1427,34 @@ test("a cancelled chooser names the ring to choose", async () => {
   assert.equal(await h.ring.scan(), false);
   assert.equal(h.ring.diagnostics.lastError, "R02_AF03 was not chosen. Make sure it is on and nearby, then press Connect R02_AF03 again.");
 });
+
+test("a remembered ring is heard advertising before Chrome is asked to connect", async () => {
+  const h = harness({ ringName: "R02_AF03", deviceName: "R02_AF03" });
+  let watching = null;
+  h.device.watchAdvertisements = async ({ signal }) => { watching = signal; };
+  await h.ring.restoreSelectedDevice();
+  const connecting = h.ring.connect();
+  await h.advance(300);
+  assert.equal(h.connectCount, 0);
+  assert.equal(watching.aborted, false);
+  h.device.emit("advertisementreceived");
+  assert.equal(await connecting, true);
+  assert.equal(h.connectCount, 1);
+  assert.equal(watching.aborted, true);
+});
+
+test("a ring that is not heard is still tried, and out of range is explained by name", async () => {
+  const h = harness({ ringName: "R02_D7B0", deviceName: "R02_D7B0" });
+  h.device.watchAdvertisements = async () => {};
+  h.device.gatt.connect = async () => { throw new Error("Bluetooth Device is no longer in range."); };
+  await h.ring.restoreSelectedDevice();
+  const connecting = h.ring.connect();
+  await h.advance(8000);
+  assert.equal(await connecting, false);
+  assert.match(h.ring.getDebugReport(), /Ring not heard advertising; connecting anyway/);
+  assert.match(h.ring.getDebugReport(), /Connection failed: Bluetooth Device is no longer in range/);
+  // Three automatic retries, each listening first, then the reason stays
+  await h.advance(32000);
+  assert.match(h.ring.diagnostics.lastError, /^R02_D7B0 is not nearby or is connected elsewhere/);
+});
+
