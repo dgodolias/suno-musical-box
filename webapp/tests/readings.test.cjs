@@ -323,9 +323,8 @@ test("music is requested at 15 s but shown from 30 s, with its bar already under
   assert.equal(page.player().generationStatus, "Recording biometric data...");
   assert.equal(page.session().status, "Recording biometric data...");
   await page.advance(15000);
-  // 16 s after the request, against an expected 40 s
-  assert.ok(page.player().generationProgress >= 31, `progress ${page.player().generationProgress}`);
-  assert.ok(page.player().generationProgress <= 33, `progress ${page.player().generationProgress}`);
+  // 16 s after the request, against an expected 40 s: still at the steady pace
+  assert.equal(page.player().generationProgress, 38);
   assert.equal(page.player().generationStatus, "Generating music... Recording continues.");
   assert.equal(page.session().collectSeconds, 30);
 });
@@ -350,11 +349,11 @@ test("the music bar follows the measured Suno time and keeps creeping if it runs
   page.generationResponses.push({ ok: true, json: async () => ({ taskId: "slow" }) });
   await page.start();
   await page.advance(55000);
-  // 40 s after the request: the expected time
-  assert.equal(page.player().generationProgress, 80);
+  // 40 s after the request: the expected time, slowed down smoothly
+  assert.equal(page.player().generationProgress, 82);
   await page.advance(60000);
-  // A minute late: well past 80%, with room left to keep moving
-  assert.ok(page.player().generationProgress >= 88 && page.player().generationProgress <= 92, `progress ${page.player().generationProgress}`);
+  // A minute late: still moving, with room left
+  assert.equal(page.player().generationProgress, 94);
   assert.ok(page.requests.filter((request) => request.url === "/api/generate/slow").length >= 25);
 });
 

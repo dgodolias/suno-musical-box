@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useRef } from "react";
+import { useId, useMemo, useRef, useState } from "react";
 import { Combobox } from "@base-ui/react/combobox";
 import { CheckIcon, ChevronDownIcon, SearchIcon, XIcon } from "lucide-react";
 import { GENRES } from "@/lib/genres";
@@ -10,6 +10,8 @@ interface GenrePickerProps {
   onChange: (genre: string | null) => void;
 }
 
+const MAX_TYPED = 80; // characters of a style typed in
+
 // Styled after educoach-platform's search-select (onboarding) and dropdown menu:
 // search icon + primary focus border, rounded-2xl popup, accent highlight,
 // primary-tinted selected row with a check.
@@ -17,9 +19,18 @@ export default function GenrePicker({ value, onChange }: GenrePickerProps) {
   const inputId = useId();
   // Anchor the popup to the whole field (icon + input + buttons), not just the <input>.
   const fieldRef = useRef<HTMLDivElement>(null);
+  const [query, setQuery] = useState("");
+  // A style that is not in the list can be used just as it was typed: it is
+  // offered after the matching genres, or alone when none match (Enter takes it)
+  const typed = query.trim().slice(0, MAX_TYPED);
+  const custom = typed && !GENRES.some((genre) => genre.toLowerCase() === typed.toLowerCase()) ? typed : null;
+  const items = useMemo(() => {
+    const extra = [custom, value].filter((genre): genre is string => !!genre && !GENRES.includes(genre));
+    return extra.length ? [...GENRES, ...new Set(extra)] : GENRES;
+  }, [custom, value]);
 
   return (
-    <Combobox.Root items={GENRES} value={value} onValueChange={onChange} autoHighlight>
+    <Combobox.Root items={items} value={value} onValueChange={onChange} onInputValueChange={setQuery} autoHighlight>
       <div className="space-y-1.5">
         <label htmlFor={inputId} className="block text-sm font-medium">
           Music style
@@ -63,7 +74,13 @@ export default function GenrePicker({ value, onChange }: GenrePickerProps) {
                   value={genre}
                   className="relative flex cursor-default items-center rounded-lg py-2 pr-9 pl-3 text-sm outline-none select-none transition-colors data-highlighted:bg-accent data-highlighted:text-accent-foreground data-selected:bg-primary/10 data-selected:font-medium data-selected:text-primary"
                 >
-                  {genre}
+                  {genre === custom && genre !== value ? (
+                    <span>
+                      Use “<span className="font-medium">{genre}</span>”
+                    </span>
+                  ) : (
+                    genre
+                  )}
                   <Combobox.ItemIndicator className="absolute right-3 flex items-center text-primary">
                     <CheckIcon className="size-4" />
                   </Combobox.ItemIndicator>

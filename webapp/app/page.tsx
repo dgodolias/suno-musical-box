@@ -28,7 +28,7 @@ const WINDOW_SEC = 30;
 // bar appears, part of the wait has already gone by
 const MUSIC_AT_SEC = 15;
 // A 3-minute V6 song was ready 37-40 s after the request in the 2026-10-06
-// benchmark; the music bar reaches its expected share at this point (placebo)
+// benchmark; the music bar has slowed to about 82% by this point (placebo)
 const SONG_EXPECTED_SEC = 40;
 // The whole wait from Start to the song, for the bar on the SyncWave display
 const PLAN_MS = Math.max(WINDOW_SEC, MUSIC_AT_SEC + SONG_EXPECTED_SEC) * 1000;
