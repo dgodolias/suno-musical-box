@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import SendSongForm from "@/components/send-song-form";
+import { DEFAULT_VOLUME, readVolume, saveVolume, subscribeVolume } from "@/lib/waiting-music";
 
 interface Song {
   taskId: string;
@@ -20,116 +21,6 @@ interface MusicPlayerProps {
   generationProgress?: number;
   onStarted?: () => void; // the song has started playing, or cannot
   onSongEnd?: () => void;
-}
-
-// Quiet music while the song is on its way: take 2B of three Suno candidates
-// (lo-fi, Rhodes, 2 min). Its volume is the listener's, kept in this browser.
-const WAITING_MUSIC = "/waiting-music.mp3";
-const VOLUME_KEY = "musical-box-waiting-volume";
-const DEFAULT_VOLUME = 0.25;
-const FADE_IN_MS = 2000;
-const FADE_OUT_MS = 1000; // quick, so the song comes straight in
-const END_FADE_S = 2.5; // the track's last seconds fade out before it starts again
-
-// The chosen volume, shared by the slider and the music; also kept in memory
-// for browsers that store nothing
-let volumeInMemory = DEFAULT_VOLUME;
-const volumeListeners = new Set<() => void>();
-function readVolume() {
-  try {
-    const saved = localStorage.getItem(VOLUME_KEY);
-    const value = saved === null ? NaN : Number(saved);
-    if (value >= 0 && value <= 1) return value;
-  } catch {
-    // storage unavailable: memory only
-  }
-  return volumeInMemory;
-}
-function saveVolume(value: number) {
-  volumeInMemory = value;
-  try {
-    localStorage.setItem(VOLUME_KEY, String(value));
-  } catch {
-    // storage unavailable: memory only
-  }
-  for (const listener of volumeListeners) listener();
-}
-function subscribeVolume(listener: () => void) {
-  volumeListeners.add(listener);
-  return () => {
-    volumeListeners.delete(listener);
-  };
-}
-
-// Fades in when the page is first used (browsers allow sound only then) and,
-// as the player is a new one, from the top after New Session; carries on
-// through Start; fades out as soon as the song is ready. At the end of the
-// track it fades out and comes back in from the top. The fades follow the
-// clock, so a background tab's slower timers still finish them.
-function WaitingMusic({ playing, volume }: { playing: boolean; volume: number }) {
-  const audioRef = useRef<HTMLAudioElement>(null);
-  const mix = useRef({ gain: 0, from: 0, to: 0, at: 0, ms: 1, volume, playing });
-  const fadeTo = useCallback((to: number, ms: number) => {
-    const m = mix.current;
-    Object.assign(m, { from: m.gain, to, at: Date.now(), ms });
-  }, []);
-  // Plays on from where the track is, fading in
-  const begin = useCallback(() => {
-    const audio = audioRef.current;
-    if (!audio || !mix.current.playing) return;
-    audio.play().then(() => fadeTo(1, FADE_IN_MS), () => {});
-  }, [fadeTo]);
-
-  useEffect(() => {
-    mix.current.volume = volume;
-  }, [volume]);
-
-  useEffect(() => {
-    mix.current.playing = playing;
-    if (!playing) {
-      fadeTo(0, FADE_OUT_MS);
-      return;
-    }
-    begin();
-    // Until the page has been used the browser refuses: the first press starts it
-    const retry = () => {
-      if (audioRef.current?.paused) begin();
-    };
-    window.addEventListener("pointerdown", retry);
-    window.addEventListener("keydown", retry);
-    return () => {
-      window.removeEventListener("pointerdown", retry);
-      window.removeEventListener("keydown", retry);
-    };
-  }, [playing, begin, fadeTo]);
-
-  useEffect(() => {
-    const timer = setInterval(() => {
-      const audio = audioRef.current;
-      const m = mix.current;
-      if (!audio) return;
-      const t = Math.min(1, (Date.now() - m.at) / m.ms);
-      m.gain = m.from + (m.to - m.from) * t;
-      // The last seconds of the track fade out; onEnded starts it again
-      if (m.playing && m.to === 1 && audio.duration - audio.currentTime < END_FADE_S) fadeTo(0, END_FADE_S * 1000);
-      if (!m.playing && t >= 1 && !audio.paused) audio.pause();
-      audio.volume = Math.min(1, Math.max(0, m.gain * m.volume));
-    }, 50);
-    return () => clearInterval(timer);
-  }, [fadeTo]);
-
-  return (
-    <audio
-      ref={audioRef}
-      src={WAITING_MUSIC}
-      preload="auto"
-      onEnded={() => {
-        if (!audioRef.current) return;
-        audioRef.current.currentTime = 0;
-        begin();
-      }}
-    />
-  );
 }
 
 export default function MusicPlayer({
@@ -166,7 +57,6 @@ export default function MusicPlayer({
 
   return (
     <div className="space-y-6">
-      <WaitingMusic playing={!currentSong} volume={waitingVolume} />
       {/* Now playing */}
       <div className="rounded-2xl border border-border/60 bg-card shadow-sticker p-6 space-y-4">
         <div className="flex items-center justify-between">
@@ -262,9 +152,9 @@ export default function MusicPlayer({
             )}
           </div>
         )}
-        {/* The waiting music's volume, for this browser */}
+        {/* The volume of the waiting music the SyncWave display plays */}
         <div className="flex items-center gap-3 border-t border-border/60 pt-4 text-xs text-muted-foreground">
-          <label htmlFor="waiting-volume" className="shrink-0">Waiting music</label>
+          <label htmlFor="waiting-volume" className="shrink-0">Waiting music (SyncWave)</label>
           <input
             id="waiting-volume"
             type="range"

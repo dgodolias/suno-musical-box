@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import ThemeToggle from "@/components/theme-toggle";
 import Credit from "@/components/credit";
+import WaitingMusic from "@/components/waiting-music";
+import { DEFAULT_VOLUME } from "@/lib/waiting-music";
 import Waveform from "@/components/waveform";
 import type { Replay } from "@/lib/db";
 import {
@@ -78,6 +80,10 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
   const songRef = useRef(false);
   const [ready, setReady] = useState(false);
   const [plan, setPlan] = useState<SessionPlan | null>(null);
+  // The waiting music, set from the Musical Box page
+  const [musicVolume, setMusicVolume] = useState(DEFAULT_VOLUME);
+  const [round, setRound] = useState(0);
+  const [musicBlocked, setMusicBlocked] = useState(false);
   const [unlinked, setUnlinked] = useState(false);
   const [awake, setAwake] = useState(false);
 
@@ -129,6 +135,8 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
           ? current : message.plan
       );
       arrive(message.song);
+      setMusicVolume(message.musicVolume);
+      setRound(message.round);
       clearTimeout(hint);
       setUnlinked(false);
     };
@@ -152,6 +160,12 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
       style={{ background: BACKDROP }}
     >
       <Waveform ratesRef={ratesRef} songRef={songRef} />
+      {/* The waiting music plays here, fading out as the song starts on the
+          Musical Box page */}
+      <WaitingMusic playing={!ready} volume={musicVolume} round={round} onBlocked={setMusicBlocked} />
+      {musicBlocked && !ready && (
+        <p className={`${note} inset-x-0 top-[3vh] px-4 text-center`}>Click anywhere to turn on the music</p>
+      )}
       {plan && <WaitBar plan={plan} done={ready} />}
       <div className="absolute inset-x-0 bottom-[6vh] flex justify-center px-4 text-[clamp(12px,1vw,20px)]">
         <Credit />

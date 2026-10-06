@@ -16,9 +16,17 @@ export interface SessionPlan {
 }
 
 export type HeartRateMessage =
-  // `plan` while a song is on its way; `song` once it is ready, until a new
-  // session begins
-  | { type: "rates"; rates: LiveHeartRates; plan: SessionPlan | null; song: boolean }
+  // `plan` while a song is on its way; `song` once it plays, until a new
+  // session begins; `musicVolume` (0-1) for the waiting music the display
+  // plays, which starts again from the top whenever `round` changes (New Session)
+  | {
+      type: "rates";
+      rates: LiveHeartRates;
+      plan: SessionPlan | null;
+      song: boolean;
+      musicVolume: number;
+      round: number;
+    }
   | { type: "hello" }; // a display that just opened asks for the current rates
 
 export const HEART_RATE_CHANNEL = "musical-box:heart-rates";

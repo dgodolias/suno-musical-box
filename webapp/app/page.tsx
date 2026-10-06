@@ -14,6 +14,7 @@ import type { RingConnection, RingData } from "@/lib/ble/ring-manager";
 import { HEART_RATE_CHANNEL } from "@/lib/heart-rate-channel";
 import type { HeartRateMessage, LiveHeartRates, SessionPlan } from "@/lib/heart-rate-channel";
 import { placebo } from "@/lib/progress";
+import { readVolume, subscribeVolume } from "@/lib/waiting-music";
 import type { BiometricReading } from "@/lib/biometrics";
 import { computeSnapshot } from "@/lib/biometrics";
 import { buildPrompt } from "@/lib/prompt-builder";
@@ -37,6 +38,16 @@ const POLL_MS = 3000;
 const SONG_START_GRACE_MS = 8000;
 const POLL_ATTEMPTS = 100; // five minutes
 const CURRENT_SESSION_KEY = "musical-box-current-session";
+// Which New Session this tab is on, kept across its reloads: the SyncWave
+// display starts its waiting music again from the top when it changes
+const ROUND_KEY = "musical-box-round";
+const readRound = () => {
+  try {
+    return Number(sessionStorage.getItem(ROUND_KEY)) || 0;
+  } catch {
+    return 0;
+  }
+};
 const MOCK_SUNO = process.env.USE_MOCK_SUNO === "true";
 const MUSIC_CONFIG_MESSAGE = "Music configuration changed. Start a new session after reloading.";
 
@@ -120,17 +131,22 @@ export default function Home() {
   const liveHrRef = useRef<LiveHeartRates>([null, null]);
   const planRef = useRef<SessionPlan | null>(null);
   const songReadyRef = useRef(false);
+  const roundRef = useRef<number | null>(null);
   const channelRef = useRef<BroadcastChannel | null>(null);
   const mockTickRef = useRef(0);
   const anyConnected = mockMode || ring1Connected || ring2Connected;
 
   // Live heart rates for the SyncWave display (/syncwave) in another tab,
-  // with the wait for the song and whether it has come
+  // with the wait for the song, whether it plays, and its waiting music
   const publishRates = useCallback(() => {
+    roundRef.current ??= readRound();
     channelRef.current?.postMessage({
       type: "rates", rates: liveHrRef.current, plan: planRef.current, song: songReadyRef.current,
+      musicVolume: readVolume(), round: roundRef.current,
     } satisfies HeartRateMessage);
   }, []);
+  // The waiting music's volume reaches the display as it is set
+  useEffect(() => subscribeVolume(publishRates), [publishRates]);
   // The SyncWave display turns into the song's note as the music starts
   const songStarted = useCallback(() => {
     if (songReadyRef.current) return;
@@ -418,8 +434,15 @@ export default function Home() {
       setElapsedSeconds(0);
       setEndPersisted(false);
       setCurrentSong(null);
-      // ...and the SyncWave display returns to its waves
+      // ...and the SyncWave display returns to its waves, its waiting music
+      // from the top
       songReadyRef.current = false;
+      roundRef.current = (roundRef.current ?? readRound()) + 1;
+      try {
+        sessionStorage.setItem(ROUND_KEY, String(roundRef.current));
+      } catch {
+        // the display hears of it now anyway
+      }
       dropPlan();
       setGenerationStatus("");
       setGenerationProgress(0);

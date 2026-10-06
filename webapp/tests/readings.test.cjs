@@ -179,6 +179,7 @@ function pageHarness({ mockSuno = false, mockBiometrics = false, demo = false, s
     constructor() { super(storage, globals.fetch, () => now); outboxes.push(this); }
   }
   dependencies["@/lib/recording-outbox"] = { ...outboxModule, RecordingOutbox: TestOutbox };
+  dependencies["@/lib/waiting-music"] = loadModule("lib/waiting-music.ts", {}, globals);
   const Home = loadModule("app/page.tsx", dependencies, globals).default;
   function render() {
     do {
@@ -204,6 +205,7 @@ function pageHarness({ mockSuno = false, mockBiometrics = false, demo = false, s
   render();
   return {
     requests, uploadResponses, generationResponses, pollResponses, storage, tabStorage, broadcasts,
+    music: dependencies["@/lib/waiting-music"],
     hello() { for (const channel of channels) channel.onmessage?.({ data: { type: "hello" } }); },
     flush: () => outboxes[0].flush(),
     unload() {
@@ -605,11 +607,12 @@ test("fresh callbacks during slow local session creation are retained from Start
 test("live heart rates reach the SyncWave display, which can ask for them", async () => {
   const page = pageHarness();
   await page.settle();
-  assert.deepEqual(page.broadcasts.at(-1), { type: "rates", rates: [null, null], plan: null, song: false });
+  assert.deepEqual(page.broadcasts.at(-1), { type: "rates", rates: [null, null], plan: null, song: false, musicVolume: 0.25, round: 0 });
   page.reading(1, 72);
   page.reading(2, 81, page.now - 500);
   assert.deepEqual(page.broadcasts.at(-1), {
     type: "rates", rates: [{ bpm: 72, at: page.now }, { bpm: 81, at: page.now - 500 }], plan: null, song: false,
+    musicVolume: 0.25, round: 0,
   });
   const sent = page.broadcasts.length;
   page.hello();
@@ -687,3 +690,23 @@ test("a song that cannot start playing still turns the display into its note, un
   page.unmount();
   again.unmount();
 });
+
+test("the display's waiting music hears its volume, and starts again with each New Session, even after a reload", async () => {
+  const page = pageHarness({ mockSuno: true });
+  await page.settle();
+  page.music.saveVolume(0.6);
+  assert.equal(page.broadcasts.at(-1).musicVolume, 0.6);
+  assert.equal(page.broadcasts.at(-1).round, 0);
+  await page.start();
+  page.reading(1, 80);
+  await page.stop();
+  await page.next();
+  assert.equal(page.broadcasts.at(-1).round, 1);
+  assert.equal(page.tabStorage.get("musical-box-round"), "1");
+  page.unmount();
+  const reloaded = pageHarness({ storage: page.storage, tabStorage: page.tabStorage, initialNow: page.now });
+  await reloaded.settle();
+  assert.equal(reloaded.broadcasts.at(-1).round, 1);
+  reloaded.unmount();
+});
+
