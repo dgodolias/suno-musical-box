@@ -100,6 +100,17 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+// What to tell the person at the screen when choosing a ring in the browser's
+// Bluetooth chooser does not work out; the technical reason goes to the debug log
+function selectionMessage(error: unknown): string {
+  const reason = errorMessage(error);
+  if (/cancel/i.test(reason)) return "No ring was selected. Press Connect ring to try again.";
+  if (/adapter|bluetooth.*(off|disabled|unavailable)/i.test(reason)) {
+    return "Bluetooth seems to be off. Turn it on, then press Connect ring again.";
+  }
+  return "Could not reach the ring. Make sure it is charged and close by, then press Connect ring again.";
+}
+
 function hex(data: DataView | ArrayBuffer): string {
   const bytes = data instanceof DataView
     ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
@@ -285,7 +296,8 @@ export class RingConnection {
     } catch (error) {
       if (generation !== this.generation) return false;
       this.setState("disconnected");
-      this.fail(`Device selection failed: ${errorMessage(error)}`);
+      this.record("event", `Device selection failed: ${errorMessage(error)}`);
+      this.fail(selectionMessage(error));
       return false;
     }
   }

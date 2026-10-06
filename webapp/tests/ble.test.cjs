@@ -497,13 +497,28 @@ test("opening a new device chooser clears the previous cancelled-scan error", as
   const h = harness();
   h.failSelection(new Error("User cancelled the requestDevice chooser"));
   assert.equal(await h.ring.scan(), false);
-  assert.match(h.ring.diagnostics.lastError, /User cancelled/);
+  assert.equal(h.ring.diagnostics.lastError, "No ring was selected. Press Connect ring to try again.");
+  assert.match(h.ring.getDebugReport(), /Device selection failed: User cancelled/);
   h.failSelection(null);
   const scanning = h.ring.scan();
   assert.equal(h.ring.state, "scanning");
   assert.equal(h.ring.diagnostics.lastError, null);
   assert.equal(h.ring.diagnostics.measurementState, "idle");
   assert.equal(await scanning, true);
+});
+
+test("a failed ring choice says what to do next", async () => {
+  for (const [reason, shown] of [
+    ["Bluetooth adapter not available.", /^Bluetooth seems to be off\./],
+    ["GATT operation failed for unknown reason.", /^Could not reach the ring\./],
+  ]) {
+    const h = harness();
+    h.failSelection(new Error(reason));
+    assert.equal(await h.ring.scan(), false);
+    assert.match(h.ring.diagnostics.lastError, shown);
+    assert.match(h.ring.getDebugReport(), new RegExp(`Device selection failed: ${reason}`));
+    assert.equal(h.ring.state, "disconnected");
+  }
 });
 
 test("fresh HR after CONTINUE clears grace and enables another silence-triggered continuation", async () => {
