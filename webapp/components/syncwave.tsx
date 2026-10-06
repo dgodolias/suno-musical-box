@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type RefObject } from "react";
 import ThemeToggle from "@/components/theme-toggle";
+import Credit from "@/components/credit";
 import Waveform from "@/components/waveform";
 import type { Replay } from "@/lib/db";
 import {
@@ -152,9 +153,9 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
     >
       <Waveform ratesRef={ratesRef} songRef={songRef} />
       {plan && <WaitBar plan={plan} done={ready} />}
-      <p className="absolute inset-x-0 bottom-[7vh] px-4 text-center text-[clamp(11px,0.9vw,18px)] text-muted-foreground/70">
-        Created by dimosthenisgkontolias.com
-      </p>
+      <div className="absolute inset-x-0 bottom-[6vh] flex justify-center px-4 text-[clamp(12px,1vw,20px)]">
+        <Credit />
+      </div>
       {ready && (
         <div
           key="ready"

@@ -123,6 +123,7 @@ function pageHarness({ mockSuno = false, mockBiometrics = false, demo = false, s
     "next/image": { default: "Image" },
     "@/components/floating-icons": { default: "FloatingIcons" },
     "@/components/theme-toggle": { default: "ThemeToggle" },
+    "@/components/credit": { default: "Credit" },
     "lucide-react": { Tv: "Tv" },
     "@/lib/heart-rate-channel": loadModule("lib/heart-rate-channel.ts"),
     "@/lib/progress": loadModule("lib/progress.ts"),
