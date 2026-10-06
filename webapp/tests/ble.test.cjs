@@ -705,7 +705,7 @@ function verifiedRing() {
   return harness({ deviceInfo: true, firmware: "R02_3.00.17_240903", hardware: "R02_V3.0" });
 }
 
-test("contact errors clear HR immediately and repeated errors preserve the first retry deadline", async () => {
+test("contact errors clear HR and the final error restarts immediately without a watchdog delay", async () => {
   const h = verifiedRing();
   await h.ring.scan();
   h.notify(packet(0x69, 6, 0, 82));
@@ -718,10 +718,9 @@ test("contact errors clear HR immediately and repeated errors preserve the first
   assert.equal(h.freshReadings.length, 1);
   assert.equal(h.ring.diagnostics.heartRateSamples, 1);
   await h.advance(2_000);
-  h.notify(packet(0x69, 6, 2, 82));
-  await h.advance(1_999);
   assert.equal(h.ring.diagnostics.startsSent, 1);
-  await h.advance(1);
+  h.notify(packet(0x69, 6, 2, 82));
+  await settle();
   assert.equal(h.ring.diagnostics.startsSent, 2);
   assert.deepEqual(h.writes.slice(-2).map((write) => write.bytes.slice(0, 3)), [[0x6a, 6, 0], [0x69, 6, 1]]);
   assert.equal(h.ring.diagnostics.measurementState, "waiting-for-contact");
@@ -735,6 +734,37 @@ test("contact errors clear HR immediately and repeated errors preserve the first
   assert.equal(h.freshReadings.length, 2);
   assert.equal(h.ring.diagnostics.heartRateSamples, 2);
   assert.equal(h.ring.diagnostics.continuesSent, 0);
+});
+
+test("final contact error alone restarts once and trailing errors cannot interrupt its writes", async () => {
+  const h = verifiedRing();
+  await h.ring.scan();
+  const release = h.blockWrites();
+  h.notify(packet(0x69, 6, 2));
+  await settle();
+  for (const code of [1, 1, 2, 2]) h.notify(packet(0x69, 6, code));
+  await h.advance(500);
+  assert.equal(h.writes.at(-1).bytes[0], 0x6a);
+  release();
+  await settle();
+  assert.equal(h.ring.diagnostics.startsSent, 2);
+  assert.equal(h.ring.diagnostics.restartCount, 1);
+  h.notify(packet(0x69, 6, 0, 80));
+  await h.advance(10_000);
+  assert.equal(h.ring.diagnostics.startsSent, 2);
+  assert.equal(h.maximumWrites, 1);
+});
+
+test("repeated preliminary contact errors retain the fallback when the final error is absent", async () => {
+  const h = verifiedRing();
+  await h.ring.scan();
+  h.notify(packet(0x69, 6, 1));
+  await h.advance(2_000);
+  h.notify(packet(0x69, 6, 1));
+  await h.advance(1_999);
+  assert.equal(h.ring.diagnostics.startsSent, 1);
+  await h.advance(1);
+  assert.equal(h.ring.diagnostics.startsSent, 2);
 });
 
 test("a spontaneous fresh HR cancels contact retry without resetting the resumed stream", async () => {
@@ -853,8 +883,8 @@ test("disconnect during contact STOP cancels its queued START and leaves no time
 test("hung contact recovery STOP closes the connection without sending START", async () => {
   const h = verifiedRing();
   await h.ring.scan();
-  h.notify(packet(0x69, 6, 2));
   const release = h.blockWrites();
+  h.notify(packet(0x69, 6, 2));
   await h.advance(7_000);
   assert.equal(h.ring.state, "disconnected");
   assert.equal(h.ring.diagnostics.startsSent, 1);

@@ -853,7 +853,7 @@ export class RingConnection {
     }
   }
 
-  private waitForContact(reason: string) {
+  private waitForContact(reason: string, errorSequenceComplete = false) {
     if (this.diagnostics.passiveObservationEndsAt) {
       this.clearLiveHeartRate();
       this.diagnostics.measurementState = "waiting-for-contact";
@@ -862,20 +862,30 @@ export class RingConnection {
       this.emitDiagnostics();
       return;
     }
-    // Removal produced codes 1 then 2 on the two verified profiles. Preserve
-    // the first retry deadline: repeated error notifications must not postpone
-    // it or generate repeated writes. Zero replies after START get 90s warmup.
-    if (this.contactRetryAt !== null) { this.emitDiagnostics(); return; }
+    // Captured removal sequences end with code 2 after repeated code 1 frames.
+    // Restart as soon as that final frame arrives, instead of waiting for the
+    // next watchdog tick. Keep the fallback deadline if only code 1 arrives.
+    // Trailing error frames must not cancel an in-flight STOP/START sequence.
+    if (this.recoveryPending) { this.emitDiagnostics(); return; }
+    if (this.contactRetryAt !== null) {
+      if (errorSequenceComplete) {
+        this.contactRetryAt = Date.now();
+        this.checkStream();
+      }
+      this.emitDiagnostics();
+      return;
+    }
     this.stopWatchdog();
     this.measurementWanted = true;
     this.contactRecoveryActive = true;
-    this.contactRetryAt = Date.now() + CONTACT_RETRY_MS;
+    this.contactRetryAt = Date.now() + (errorSequenceComplete ? 0 : CONTACT_RETRY_MS);
     this.clearLiveHeartRate();
     this.diagnostics.measurementState = "waiting-for-contact";
     this.diagnostics.lastError = null;
     this.record("event", `${reason}; waiting for contact before retry`);
     this.emitDiagnostics();
     this.watchdog = setInterval(() => this.checkStream(), WATCHDOG_INTERVAL_MS);
+    if (errorSequenceComplete) this.checkStream();
   }
 
   disconnect(): Promise<void> {
@@ -1011,7 +1021,7 @@ export class RingConnection {
         const contactError = parsed.status === "error" && parsed.command === 0x69 &&
           parsed.type === RealTimeType.REAL_TIME_HEART_RATE &&
           (parsed.errorCode === 1 || parsed.errorCode === 2) && this.hasVerifiedRealtimeProfile();
-        if (contactError) this.waitForContact(message);
+        if (contactError) this.waitForContact(message, parsed.errorCode === 2);
         else void this.finishRealtimeCapture(message);
       } else {
         this.fail(message);
