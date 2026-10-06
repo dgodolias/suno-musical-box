@@ -12,6 +12,24 @@ interface GenrePickerProps {
 
 const MAX_TYPED = 80; // characters of a style typed in
 
+// What was typed comes first: the genre it names, or, when no genre is exactly
+// that, the text itself to use as it is (Enter takes it). Then genres starting
+// with it, genres with a word starting with it, and genres containing it, each
+// alphabetically
+function rank(typed: string, custom: string | null): string[] {
+  const query = typed.toLowerCase();
+  if (!query) return GENRES;
+  const tiers: string[][] = [[], [], [], []];
+  for (const genre of GENRES) {
+    const name = genre.toLowerCase();
+    if (name === query) tiers[0].push(genre);
+    else if (name.startsWith(query)) tiers[1].push(genre);
+    else if (name.split(/[\s\-/&]+/).some((word) => word.startsWith(query))) tiers[2].push(genre);
+    else if (name.includes(query)) tiers[3].push(genre);
+  }
+  return [...(custom ? [custom] : []), ...tiers.flat()];
+}
+
 // Styled after educoach-platform's search-select (onboarding) and dropdown menu:
 // search icon + primary focus border, rounded-2xl popup, accent highlight,
 // primary-tinted selected row with a check.
@@ -20,17 +38,24 @@ export default function GenrePicker({ value, onChange }: GenrePickerProps) {
   // Anchor the popup to the whole field (icon + input + buttons), not just the <input>.
   const fieldRef = useRef<HTMLDivElement>(null);
   const [query, setQuery] = useState("");
-  // A style that is not in the list can be used just as it was typed: it is
-  // offered after the matching genres, or alone when none match (Enter takes it)
+  // A style that is not in the list can be used just as it was typed
   const typed = query.trim().slice(0, MAX_TYPED);
   const custom = typed && !GENRES.some((genre) => genre.toLowerCase() === typed.toLowerCase()) ? typed : null;
   const items = useMemo(() => {
     const extra = [custom, value].filter((genre): genre is string => !!genre && !GENRES.includes(genre));
     return extra.length ? [...GENRES, ...new Set(extra)] : GENRES;
   }, [custom, value]);
+  const shown = useMemo(() => rank(typed, custom), [typed, custom]);
 
   return (
-    <Combobox.Root items={items} value={value} onValueChange={onChange} onInputValueChange={setQuery} autoHighlight>
+    <Combobox.Root
+      items={items}
+      filteredItems={shown}
+      value={value}
+      onValueChange={onChange}
+      onInputValueChange={setQuery}
+      autoHighlight
+    >
       <div className="space-y-1.5">
         <label htmlFor={inputId} className="block text-sm font-medium">
           Music style
