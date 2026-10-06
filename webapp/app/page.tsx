@@ -20,6 +20,10 @@ import { EMPTY_SYNC_STATUS, RecordingOutbox } from "@/lib/recording-outbox";
 import type { RecordedReading, RecordingSession } from "@/lib/recording-outbox";
 
 const WINDOW_SEC = 30;
+// The music is requested this many seconds in, from the readings so far, while
+// the page keeps showing the recording until WINDOW_SEC: by the time the music
+// bar appears, part of the wait has already gone by
+const MUSIC_AT_SEC = 20;
 const CURRENT_SESSION_KEY = "musical-box-current-session";
 const MOCK_SUNO = process.env.USE_MOCK_SUNO === "true";
 const MUSIC_CONFIG_MESSAGE = "Music configuration changed. Start a new session after reloading.";
@@ -237,13 +241,13 @@ export default function Home() {
     }
   }, []);
 
-  const pollForSong = useCallback(async (taskId: string, prompt: string, style: string, run: number) => {
+  const pollForSong = useCallback(async (taskId: string, prompt: string, style: string, run: number, requestedAt: number) => {
     if (generationRunRef.current !== run) return;
     setGenerationStatus("Generating music... Recording continues.");
-    const startedAt = Date.now();
     const progressTimer = setInterval(() => {
       if (generationRunRef.current !== run) { clearInterval(progressTimer); return; }
-      const elapsed = (Date.now() - startedAt) / 1000;
+      // Counted from the request, so the bar is already under way when it appears
+      const elapsed = (Date.now() - requestedAt) / 1000;
       const progress = elapsed <= 108 ? elapsed / 108 * 90 : 90 + 9 * (elapsed - 108) / (elapsed - 78);
       setGenerationProgress(Math.min(99, Math.round(progress)));
     }, 500);
@@ -258,6 +262,10 @@ export default function Home() {
         const data = await response.json();
         if (generationRunRef.current !== run) return;
         if (data.status === "ready" && data.audioUrl) {
+          // Even a song that is ready early waits for the full recording window
+          const windowEnd = (activeSessionRef.current?.startedAt ?? 0) + WINDOW_SEC * 1000;
+          if (Date.now() < windowEnd) await new Promise((resolve) => setTimeout(resolve, windowEnd - Date.now()));
+          if (generationRunRef.current !== run) return;
           setCurrentSong({ taskId, audioUrl: data.audioUrl, prompt, style, number: 1 });
           setGenerationStatus("");
           setGenerationProgress(100);
@@ -287,13 +295,14 @@ export default function Home() {
       if (generationRunRef.current !== run) return;
       const saved = await outbox.getSession(session.clientSessionId);
       if (!saved?.serverSessionId) throw new Error("Session is still pending upload");
-      const readings = await outbox.snapshot(session.clientSessionId, session.startedAt, session.startedAt + WINDOW_SEC * 1000);
+      const readings = await outbox.snapshot(session.clientSessionId, session.startedAt, session.startedAt + MUSIC_AT_SEC * 1000);
       const p1 = readings.filter((reading) => reading.personId === 1);
       const p2 = readings.filter((reading) => reading.personId === 2);
       const snapshot = p1.length >= 5 && p2.length >= 5 ? computeSnapshot(p1, p2) : null;
       const { prompt, style } = buildPrompt(session.genre1, session.genre2);
       if (generationRunRef.current !== run) return;
       setGenerationStatus(MOCK_SUNO ? "Preparing mock audio (no credits)..." : "Submitting to Suno... Recording continues.");
+      const requestedAt = Date.now();
       const response = await fetch("/api/generate", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sessionId: saved.serverSessionId, prompt, style, snapshot }),
@@ -304,7 +313,7 @@ export default function Home() {
       const data = await response.json();
       if (generationRunRef.current !== run) return;
       if (!data.taskId) throw new Error("Music service did not return a task ID");
-      void pollForSong(data.taskId, prompt, style, run);
+      void pollForSong(data.taskId, prompt, style, run, requestedAt);
     } catch (error) {
       if (generationRunRef.current === run) setGenerationStatus("Music unavailable; recording continues. " + String(error));
     }
@@ -399,7 +408,7 @@ export default function Home() {
       }
       const elapsed = Math.floor((Date.now() - session.startedAt) / 1000);
       setElapsedSeconds(elapsed);
-      if (elapsed >= WINDOW_SEC) void generateSong();
+      if (elapsed >= MUSIC_AT_SEC) void generateSong();
     }, 1000);
     return () => clearInterval(timer);
   }, [isActive, mockMode, generateSong, recordReading]);
@@ -410,6 +419,10 @@ export default function Home() {
     : sync.localWrites > 0 ? "Saving locally..."
     : sync.pendingReadings > 0 || sync.pendingSessions > 0 ? `${sync.pendingReadings} measurements pending upload`
     : saved ? "Saved" : isActive ? "All received measurements saved" : "Ready";
+  // Until the recording window ends the music stays out of sight, even though it
+  // was requested at MUSIC_AT_SEC
+  const musicShown = !isActive || elapsedSeconds >= WINDOW_SEC;
+  const shownStatus = musicShown ? generationStatus : "Recording biometric data...";
   return (
     <div className="relative min-h-screen bg-background text-foreground">
       <FloatingIcons />
@@ -514,7 +527,7 @@ export default function Home() {
           isActive={isActive}
           collectSeconds={Math.min(elapsedSeconds, WINDOW_SEC)}
           windowSeconds={WINDOW_SEC}
-          status={generationStatus || (isActive ? "Recording..." : "")}
+          status={shownStatus || (isActive ? "Recording..." : "")}
         />
 
         {/* Music player */}
@@ -522,8 +535,8 @@ export default function Home() {
           key={playerEpoch}
           currentSong={currentSong}
           history={[]}
-          generationStatus={generationStatus}
-          generationProgress={generationProgress}
+          generationStatus={shownStatus}
+          generationProgress={musicShown ? generationProgress : 0}
           onSongEnd={() => {}}
         />
 

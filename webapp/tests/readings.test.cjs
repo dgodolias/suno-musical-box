@@ -283,14 +283,14 @@ test("full time series continues beyond 30 seconds and stops at explicit Stop wi
   assert.match(page.text(), /Saved/);
 });
 
-test("song-ready finishes recording after generation; snapshot stays in the first 30 seconds", async () => {
+test("song-ready finishes recording after generation; snapshot stays in the first 20 seconds", async () => {
   const page = pageHarness();
   page.generationResponses.push({ ok: true, json: async () => ({ taskId: "song" }) });
   page.pollResponses.push({ ok: true, json: async () => ({ status: "pending" }) });
   page.pollResponses.push({ ok: true, json: async () => ({ status: "ready", audioUrl: "https://test.invalid/song.mp3" }) });
   await page.start();
   for (let i = 0; i < 5; i++) { page.reading(1, 70); page.reading(2, 80); }
-  await page.advance(31000);
+  await page.advance(21000);
   page.reading(1, 150);
   await page.advance(18000);
   page.reading(2, 160);
@@ -301,9 +301,38 @@ test("song-ready finishes recording after generation; snapshot stays in the firs
   assert.equal(page.generations()[0].body.snapshot.person1.avgHr, 70);
   assert.equal(page.generations()[0].body.snapshot.person2.avgHr, 80);
   const session = [...page.storage.sessions.values()][0];
-  assert.equal(session.endedAt - session.startedAt, 50000);
+  assert.equal(session.endedAt - session.startedAt, 40000);
   assert.equal([...page.storage.samples.values()].length, 12);
   assert.equal(session.acknowledgedCount, 12);
+});
+
+test("music is requested at 20 s but shown from 30 s, with its bar already under way", async () => {
+  const page = pageHarness();
+  page.generationResponses.push({ ok: true, json: async () => ({ taskId: "early" }) });
+  await page.start();
+  for (let i = 0; i < 5; i++) { page.reading(1, 70); page.reading(2, 80); }
+  await page.advance(19000);
+  assert.equal(page.generations().length, 0);
+  await page.advance(2000);
+  assert.equal(page.generations().length, 1);
+  assert.equal(page.player().generationProgress, 0);
+  assert.equal(page.player().generationStatus, "Recording biometric data...");
+  assert.equal(page.session().status, "Recording biometric data...");
+  await page.advance(10000);
+  assert.ok(page.player().generationProgress >= 8, `progress ${page.player().generationProgress}`);
+  assert.equal(page.player().generationStatus, "Generating music... Recording continues.");
+  assert.equal(page.session().collectSeconds, 30);
+});
+
+test("a song ready before 30 s still records the whole window", async () => {
+  const page = pageHarness();
+  page.generationResponses.push({ ok: true, json: async () => ({ taskId: "quick" }) });
+  page.pollResponses.push({ ok: true, json: async () => ({ status: "ready", audioUrl: "https://test.invalid/quick.mp3" }) });
+  await page.start();
+  await page.advance(35000);
+  assert.equal(page.player().currentSong.taskId, "quick");
+  const session = [...page.storage.sessions.values()][0];
+  assert.ok(session.endedAt - session.startedAt >= 30000, `ended after ${session.endedAt - session.startedAt} ms`);
 });
 
 test("New Session resets session/player/genres while retaining both ring connection refs", async () => {
