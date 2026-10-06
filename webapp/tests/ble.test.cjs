@@ -104,8 +104,9 @@ class Events {
 
 async function settle() { for (let index = 0; index < 30; index++) await Promise.resolve(); }
 
-function harness({ deviceInfo = false, writeWithoutResponse = true, firmware = "3.01\0", hardware = "R02" } = {}) {
+function harness({ deviceInfo = false, writeWithoutResponse = true, firmware = "3.01\0", hardware = "R02", ringName = null, deviceName = "Test ring", otherDevices = [] } = {}) {
   let now = 1_800_000_000_000;
+  let lastRequest = null;
   let timerId = 0;
   let writeGate = null;
   let connectionGate = null;
@@ -158,7 +159,7 @@ function harness({ deviceInfo = false, writeWithoutResponse = true, firmware = "
       return { getCharacteristic: async (uuid) => uuid === protocol.COLMI_TX_UUID ? tx : rx };
     },
   };
-  device.name = "Test ring";
+  device.name = deviceName;
   device.id = "test-ring-id";
   device.gatt = server;
   const globals = {
@@ -170,13 +171,13 @@ function harness({ deviceInfo = false, writeWithoutResponse = true, firmware = "
     clearTimeout: (id) => timers.delete(id),
     localStorage: { getItem: (key) => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
     navigator: { bluetooth: {
-      requestDevice: async () => { selectionCount++; if (selectionError) throw selectionError; return device; },
-      getDevices: async () => [device],
+      requestDevice: async (options) => { selectionCount++; lastRequest = options; if (selectionError) throw selectionError; return device; },
+      getDevices: async () => [...otherDevices, device],
     } },
   };
   const protocol = load(protocolCode, globals);
   const { RingConnection } = load(managerCode, globals, { "./colmi-protocol": protocol });
-  const ring = new RingConnection(1);
+  const ring = new RingConnection(1, ringName);
   ring.onHeartRate = (reading) => freshReadings.push(reading);
   ring.onData = (data) => allData.push(data);
   ring.onDiagnostics = (data) => allDiagnostics.push(data);
@@ -184,6 +185,7 @@ function harness({ deviceInfo = false, writeWithoutResponse = true, firmware = "
     ring, protocol, device, tx, server, writes, freshReadings, allData, allDiagnostics, timers,
     get maximumWrites() { return maximumWrites; },
     get selectionCount() { return selectionCount; },
+    get lastRequest() { return lastRequest; },
     get connectCount() { return connectCount; },
     storage,
     failConnections(count) { connectionFailures = count; },
@@ -1388,4 +1390,40 @@ test("unexpected disconnect cancels optical capture timers and retains its incom
   assert.match(h.ring.diagnostics.lastError, /Bluetooth connection lost/);
   assert.equal(h.timers.size, 0);
   assert.equal(JSON.parse(h.ring.getDebugReport()).opticalDiagnostic.frames.length, 1);
+});
+
+test("a person's ring is the only one Chrome's chooser lists, unless any ring is asked for", async () => {
+  const h = harness({ ringName: "R02_AF03", deviceName: "R02_AF03" });
+  assert.equal(await h.ring.scan(), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.lastRequest.filters)), [{ name: "R02_AF03" }]);
+  await h.ring.disconnect();
+  assert.equal(await h.ring.scan(true), true);
+  assert.ok(h.lastRequest.filters.some((filter) => filter.namePrefix === "R02"));
+  // Without a name it lists every Colmi ring, as before
+  const plain = harness();
+  assert.equal(await plain.ring.scan(), true);
+  assert.ok(plain.lastRequest.filters.some((filter) => filter.namePrefix === "R02"));
+});
+
+test("a remembered ring is found by its name, never the other person's", async () => {
+  const other = { name: "R02_D7B0", id: "other-ring-id" };
+  const h = harness({ ringName: "R02_AF03", deviceName: "R02_AF03", otherDevices: [other] });
+  // Saved for this person by mistake earlier: passed over for the named ring
+  h.storage.set("musical-box-ring-1", "other-ring-id");
+  await h.ring.restoreSelectedDevice();
+  assert.equal(h.ring.device, h.device);
+  assert.equal(h.selectionCount, 0);
+  assert.equal(h.connectCount, 0);
+  // Only the other ring remembered: nothing is picked for this person
+  const alone = harness({ ringName: "R02_AF03", deviceName: "R02_D7B0" });
+  alone.storage.set("musical-box-ring-1", "test-ring-id");
+  await alone.ring.restoreSelectedDevice();
+  assert.equal(alone.ring.device, null);
+});
+
+test("a cancelled chooser names the ring to choose", async () => {
+  const h = harness({ ringName: "R02_AF03", deviceName: "R02_AF03" });
+  h.failSelection(new Error("User cancelled the requestDevice chooser"));
+  assert.equal(await h.ring.scan(), false);
+  assert.equal(h.ring.diagnostics.lastError, "R02_AF03 was not chosen. Make sure it is on and nearby, then press Connect R02_AF03 again.");
 });

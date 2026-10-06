@@ -13,6 +13,8 @@ interface RingCardProps {
   personId: 1 | 2;
   label: string;
   size: string;
+  // The ring this person wears, as Chrome lists it (e.g. R02_AF03)
+  ringName: string;
   onData?: (personId: 1 | 2, data: RingData) => void;
   onConnectionChange?: (personId: 1 | 2, connected: boolean) => void;
   connectionRef?: React.MutableRefObject<RingConnection | null>;
@@ -26,6 +28,7 @@ export default function RingCard({
   personId,
   label,
   size,
+  ringName,
   onData,
   onConnectionChange,
   connectionRef,
@@ -68,7 +71,7 @@ export default function RingCard({
   useEffect(() => {
     if (mockMode) return;
 
-    const ring = new RingConnection(personId);
+    const ring = new RingConnection(personId, ringName);
     ring.onStateChange = (s) => {
       setState(s);
       setName(ring.device ? ring.name : "");
@@ -98,7 +101,7 @@ export default function RingCard({
       if (connectionRef?.current === ring) connectionRef.current = null;
       void ring.disconnect();
     };
-  }, [personId, mockMode]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [personId, ringName, mockMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Advance the age even when the ring has stopped sending notifications.
   useEffect(() => {
@@ -110,11 +113,13 @@ export default function RingCard({
     return () => clearInterval(timer);
   }, [state, mockMode]);
 
+  // This person's ring straight away when Chrome remembers it, otherwise
+  // Chrome's chooser listing only that ring
   const handleScan = useCallback(() => {
     const ring = ringRef.current;
-    if (ring?.device) void ring.connect();
+    if (ring?.device && ring.name === ringName) void ring.connect();
     else void ring?.scan();
-  }, []);
+  }, [ringName]);
 
   const handleDisconnect = useCallback(() => {
     void ringRef.current?.disconnect();
@@ -212,6 +217,25 @@ export default function RingCard({
     : null;
   const batteryAgeLabel = batteryAge === null ? "not read" : batteryAge < 60
     ? `${batteryAge}s ago` : `${Math.floor(batteryAge / 60)}m ago`;
+  // When the ring needs someone: off the finger, paused, or failing
+  const attention = opticalActive ? null
+    : measurementPaused
+      ? "Measurement paused · choose Retry measurement to resume"
+      : waitingForContact
+        ? passiveObservation ? "No valid reading · observing without retries" : "Put the ring back on · retrying measurement automatically"
+        : diagnostics?.measurementState === "error"
+          ? "Measurement needs attention · see diagnostics below"
+          : null;
+  const status = opticalActive
+    ? diagnostics?.opticalState === "stopping"
+      ? "Optical test · checking for trailing packets"
+      : "Optical test · heart-rate recording paused"
+    : attention
+      ?? (diagnostics?.measurementState === "warming-up" || secondsSinceReading === null
+        ? "Warming up · keep the ring still against your skin"
+        : fresh
+          ? `Receiving · last measurement ${secondsSinceReading}s ago`
+          : `Last reading · no new measurement for ${secondsSinceReading}s`);
 
   return (
     <Card
@@ -275,34 +299,14 @@ export default function RingCard({
               className={`ml-auto text-xs ${displayData.batteryLevel < 20 ? "text-destructive" : "text-muted-foreground"}`}
             >
               🔋 {displayData.batteryLevel}%{displayData.isCharging ? " ⚡" : ""}
-              {!mockMode && <span className="block text-right text-[10px]">Read {batteryAgeLabel}</span>}
             </span>
           )}
         </div>
 
-        {!mockMode && isConnected && (
-          <div className="-mt-2 space-y-1 text-xs text-muted-foreground">
-            <p>
-              {opticalActive
-                ? diagnostics?.opticalState === "stopping"
-                  ? "Optical test · checking for trailing packets"
-                  : "Optical test · heart-rate recording paused"
-                : measurementPaused
-                  ? "Measurement paused · choose Retry measurement to resume"
-                  : waitingForContact
-                    ? passiveObservation ? "No valid reading · observing without retries" : "Put the ring back on · retrying measurement automatically"
-                    : diagnostics?.measurementState === "error"
-                      ? "Measurement needs attention · see diagnostics below"
-                      : diagnostics?.measurementState === "warming-up" || secondsSinceReading === null
-                        ? "Warming up · keep the ring still against your skin"
-                        : fresh
-                          ? `Receiving · last measurement ${secondsSinceReading}s ago`
-                          : `Last reading · no new measurement for ${secondsSinceReading}s`}
-            </p>
-            <p className="tabular-nums" data-testid={`ring-${personId}-sample-count`}>
-              {diagnostics?.heartRateSamples ?? 0} real measurements received
-            </p>
-          </div>
+        {/* Only what needs someone to act stays in view; the running status is
+            under Measurement diagnostics */}
+        {!mockMode && isConnected && attention && (
+          <p role="status" className="-mt-2 text-xs text-muted-foreground">{attention}</p>
         )}
 
         {!mockMode && diagnostics?.lastError && (
@@ -332,20 +336,33 @@ export default function RingCard({
               disabled={isLoading}
             >
               <Bluetooth />
-              {state === "scanning" ? "Choose ring in Chrome…" : state === "connecting" ? "Connecting…" : name ? `Reconnect ${name}` : "Connect ring"}
+              {state === "scanning" ? `Choose ${ringName} in Chrome…` : state === "connecting" ? `Connecting ${ringName}…` : `Connect ${ringName}`}
             </Button>
             {(state === "connecting" || diagnostics?.lastError?.startsWith("Connection interrupted. Reconnecting")) && (
               <Button variant="ghost" size="sm" onClick={handleDisconnect}>Cancel connection</Button>
             )}
             {!isLoading && name && (
-              <Button variant="ghost" size="sm" onClick={() => { void ringRef.current?.scan(); }}>Choose another ring</Button>
+              <Button variant="ghost" size="sm" onClick={() => { void ringRef.current?.scan(true); }}>Choose a different ring</Button>
             )}
           </div>
+        )}
+        {!mockMode && name && name !== ringName && (
+          <p role="status" className="text-xs text-destructive">
+            {isConnected ? `Connected to ${name}` : `${name} is selected`}, but {label} wears {ringName} (size {size}).
+          </p>
         )}
 
         {!mockMode && diagnostics && (
           <details className="border-t border-border/60 pt-3 text-xs text-muted-foreground">
             <summary className="cursor-pointer font-medium">Measurement diagnostics</summary>
+            {isConnected && (
+              <div className="mt-3 space-y-1">
+                <p>{status}</p>
+                <p className="tabular-nums" data-testid={`ring-${personId}-sample-count`}>
+                  {diagnostics.heartRateSamples} real measurements received
+                </p>
+              </div>
+            )}
             <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 break-words">
               <dt>Sensor state</dt><dd>{diagnostics.measurementState}</dd>
               <dt>Firmware</dt><dd>{diagnostics.firmware ?? "Not reported"}</dd>

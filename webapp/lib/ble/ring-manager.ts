@@ -104,13 +104,18 @@ function errorMessage(error: unknown): string {
 
 // What to tell the person at the screen when choosing a ring in the browser's
 // Bluetooth chooser does not work out; the technical reason goes to the debug log
-function selectionMessage(error: unknown): string {
+function selectionMessage(error: unknown, ringName: string | null = null): string {
   const reason = errorMessage(error);
-  if (/cancel/i.test(reason)) return "No ring was selected. Press Connect ring to try again.";
-  if (/adapter|bluetooth.*(off|disabled|unavailable)/i.test(reason)) {
-    return "Bluetooth seems to be off. Turn it on, then press Connect ring again.";
+  const button = ringName ? `Connect ${ringName}` : "Connect ring";
+  if (/cancel/i.test(reason)) {
+    return ringName
+      ? `${ringName} was not chosen. Make sure it is on and nearby, then press ${button} again.`
+      : `No ring was selected. Press ${button} to try again.`;
   }
-  return "Could not reach the ring. Make sure it is charged and close by, then press Connect ring again.";
+  if (/adapter|bluetooth.*(off|disabled|unavailable)/i.test(reason)) {
+    return `Bluetooth seems to be off. Turn it on, then press ${button} again.`;
+  }
+  return `Could not reach the ring. Make sure it is charged and close by, then press ${button} again.`;
 }
 
 function hex(data: DataView | ArrayBuffer): string {
@@ -173,7 +178,8 @@ export class RingConnection {
   private opticalNormalStopAt = 0;
   private opticalPreparationHeartRateAt = 0;
 
-  constructor(public personId: 1 | 2) {}
+  // `ringName`: the ring this person wears, as Chrome lists it (e.g. R02_AF03)
+  constructor(public personId: 1 | 2, readonly ringName: string | null = null) {}
 
   get name(): string {
     return this.device?.name || "Unknown";
@@ -278,15 +284,21 @@ export class RingConnection {
     }, delay);
   }
 
-  /** Restore permission only; never start sensors just because the page loaded. */
+  /** Restore permission only; never start sensors just because the page loaded.
+   * This person's ring by name, else the one chosen for them last time. Chrome
+   * remembers rings across reloads only with its new Bluetooth permissions
+   * (chrome://flags/#enable-web-bluetooth-new-permissions-backend and
+   * #enable-experimental-web-platform-features); otherwise its chooser opens. */
   async restoreSelectedDevice(): Promise<void> {
     const generation = this.generation;
     try {
       const id = localStorage.getItem(`musical-box-ring-${this.personId}`);
-      if (!id || !navigator.bluetooth?.getDevices) return;
+      if (!navigator.bluetooth?.getDevices) return;
       const devices = await navigator.bluetooth.getDevices();
       if (generation !== this.generation || this.state !== "disconnected" || this.device) return;
-      this.device = devices.find((device) => device.id === id) ?? null;
+      const ours = (device: BluetoothDevice) => this.ringName === null || !device.name || device.name === this.ringName;
+      this.device = devices.find((device) => this.ringName !== null && device.name === this.ringName)
+        ?? devices.find((device) => device.id === id && ours(device)) ?? null;
       this.setState(this.state);
     } catch (error) {
       this.record("event", `Saved ring unavailable: ${errorMessage(error)}`);
@@ -316,7 +328,8 @@ export class RingConnection {
     this.scheduleReconnect();
   };
 
-  async scan(): Promise<boolean> {
+  /** Opens Chrome's chooser, listing only this person's ring unless `anyRing`. */
+  async scan(anyRing = false): Promise<boolean> {
     if (this.closing || this.state === "scanning" || this.state === "connecting") return false;
     if (this.state === "connected") return true;
     this.cancelReconnect();
@@ -331,7 +344,9 @@ export class RingConnection {
     this.setState("scanning");
     try {
       const device = await navigator.bluetooth.requestDevice({
-        filters: [{ services: [COLMI_SERVICE_UUID] }, { namePrefix: "R02" }, { namePrefix: "COLMI" }, { namePrefix: "R06" }, { namePrefix: "R09" }],
+        filters: this.ringName && !anyRing
+          ? [{ name: this.ringName }]
+          : [{ services: [COLMI_SERVICE_UUID] }, { namePrefix: "R02" }, { namePrefix: "COLMI" }, { namePrefix: "R06" }, { namePrefix: "R09" }],
         optionalServices: [COLMI_SERVICE_UUID, "device_information"],
       });
       if (generation !== this.generation) return false;
@@ -346,7 +361,7 @@ export class RingConnection {
       if (generation !== this.generation) return false;
       this.setState("disconnected");
       this.record("event", `Device selection failed: ${errorMessage(error)}`);
-      this.fail(selectionMessage(error));
+      this.fail(selectionMessage(error, this.ringName));
       return false;
     }
   }

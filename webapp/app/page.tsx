@@ -529,12 +529,13 @@ export default function Home() {
           {sync.pendingReadings > 0 && sync.localWrites === 0 && <p>Pending measurements are kept on this device and retried automatically.</p>}
         </div>
 
-        {/* Ring cards */}
+        {/* Ring cards: each person's ring by the name Chrome lists it under */}
         <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
           <RingCard
             personId={1}
             label="Person 1"
             size="9"
+            ringName="R02_AF03"
             onData={addReading}
             onConnectionChange={handleConnectionChange}
             connectionRef={ring1Ref}
@@ -547,6 +548,7 @@ export default function Home() {
             personId={2}
             label="Person 2"
             size="11"
+            ringName="R02_D7B0"
             onData={addReading}
             onConnectionChange={handleConnectionChange}
             connectionRef={ring2Ref}
