@@ -30,6 +30,9 @@ const REST_BPM = 50;
 const REST_AMP = 0.05;
 const SHARED = 7.7; // seed of the shape both waves take once in sync
 const SPARKS = 90;
+const MAGNET_S = 2.4; // seconds from one tug of the magnet to the next
+const NOTE_SIZE = 0.56; // the song's note, as a share of the height
+const NOTE_RISE = 0.07; // how far above the axis its centre sits, as a share of the height
 
 type Hsl = [number, number, number];
 type Rgb = [number, number, number];
@@ -70,6 +73,34 @@ const FADE = Array.from({ length: STEPS + 1 }, (_, j) => {
 
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 const clamp = (value: number, low: number, high: number) => Math.min(high, Math.max(low, value));
+
+// The lucide Music icon in its 24-unit box: a beam on two stems, each on a
+// note head. When the song is ready Person 1's wave becomes the left half,
+// round its head, up the stem to the middle of the beam, and Person 2's the
+// right half on from there, so the two lines make the one note between them.
+// Each half is the same number of points as a ridge, evenly spaced along it
+const NOTE_HALVES = (() => {
+  // Each head is run round so the line leaves it the way it arrived
+  const round = (cx: number, cy: number, r: number, way: number) =>
+    Array.from({ length: 49 }, (_, i) => [cx + r * Math.cos((TAU * i) / 48), cy + way * r * Math.sin((TAU * i) / 48)]);
+  const left = [...round(6, 18, 3, -1), [9, 5], [15, 4]];
+  const right = [[15, 4], [21, 3], [21, 16], ...round(18, 16, 3, 1)];
+  return [left, right].map((path) => {
+    const along = [0];
+    for (let i = 1; i < path.length; i++) along.push(along[i - 1] + Math.hypot(path[i][0] - path[i - 1][0], path[i][1] - path[i - 1][1]));
+    const xs = new Float32Array(STEPS + 1);
+    const ys = new Float32Array(STEPS + 1);
+    let i = 1;
+    for (let j = 0; j <= STEPS; j++) {
+      const s = (j / STEPS) * along[along.length - 1];
+      while (i < path.length - 1 && along[i] < s) i++;
+      const f = (s - along[i - 1]) / (along[i] - along[i - 1] || 1);
+      xs[j] = lerp(path[i - 1][0], path[i][0], f);
+      ys[j] = lerp(path[i - 1][1], path[i][1], f);
+    }
+    return [xs, ys] as const;
+  });
+})();
 const mix = (a: Hsl, b: Hsl, t: number): Hsl => [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
 
 function rgb([h, s, l]: Hsl, dl = 0): Rgb {
@@ -155,8 +186,9 @@ void main() {
 }`;
 const FLOATS = 8;
 // Per wave: a flank and a line per ridge, then four strokes on the front one;
-// after both, two glows between them, two strokes on the axis and the sparks
-const STRIP_VERTICES = (2 * (2 * ROWS + 4) + 4) * ((STEPS + 1) * 2 + 2) + SPARKS * 6;
+// after both, two glows between them, two strokes on the axis, its flash and
+// the sparks
+const STRIP_VERTICES = (2 * (2 * ROWS + 4) + 5) * ((STEPS + 1) * 2 + 2) + SPARKS * 6;
 const SIGN_W = 512;
 const SIGN_H = 256;
 
@@ -192,7 +224,8 @@ interface Wave {
   shown: number | null; // the figure painted on its sign
   flash: number; // lights the sign up when the figure changes
   color: Hsl;
-  line: Float32Array; // where the front ridge runs
+  lineX: Float32Array; // where the front ridge runs
+  line: Float32Array;
   base: Float32Array; // the line it rests on
   bell: Float32Array; // how far along its swing each point is
   sign: CanvasRenderingContext2D | null;
@@ -210,9 +243,15 @@ interface Wave {
 // close in on the axis, turn pink and fall into step, until one is the mirror
 // image of the other, and bells that face each other light the space between
 // them.
+// Two hearts on the same number act like magnets: a flash on the axis and a
+// tug on the waves every couple of seconds, as if they were trying to join.
+// When the song is ready (`songRef`) the two lines gather up into its note,
+// and go back to their waves when a new session begins.
 // It follows the page's colour mode: light paints the ridges in ink on the
 // page, dark and cosmic draw them in light.
-export default function Waveform({ ratesRef }: { ratesRef: RefObject<LiveHeartRates> }) {
+export default function Waveform({
+  ratesRef, songRef,
+}: { ratesRef: RefObject<LiveHeartRates>; songRef: RefObject<boolean> }) {
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -280,7 +319,7 @@ export default function Waveform({ ratesRef }: { ratesRef: RefObject<LiveHeartRa
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, sign);
       return {
         bpm: REST_BPM, quick: REST_BPM, calm: REST_BPM, level: 0, amp: REST_AMP, speed: CRUISE, bells: REST_BPM / BPM_PER_BELL, offset: 0, pastAt: [], pastOffset: [], pastBells: [], sheen: 0,
-        beat: 0, due: 0, shown: null, flash: 0, color: VIOLET, line: row(), base: row(), bell: row(),
+        beat: 0, due: 0, shown: null, flash: 0, color: VIOLET, lineX: row(), line: row(), base: row(), bell: row(),
         sign: sign.getContext("2d"), figure,
       };
     });
@@ -339,6 +378,13 @@ export default function Waveform({ ratesRef }: { ratesRef: RefObject<LiveHeartRa
     let night = BACKDROPS.midnight;
     let sync = 0; // 0 = apart, 1 = the two hearts agree
     let harmony = 0; // builds up while they stay in sync
+    let magnet = 0; // 1 while both read the same number
+    let tug = 0; // the latest pull of the magnet, fading
+    let tugged = -Infinity; // when it was
+    let song = 0; // climbs to 1 while the song is ready...
+    let morph = 0; // ...and the waves become its note
+    let fold = 1; // what is left of the flanks and the ridges behind while it does
+    let hadSong = false;
     let last = opened;
     let nextSpark = 0;
     let raf = 0;
@@ -368,20 +414,19 @@ export default function Waveform({ ratesRef }: { ratesRef: RefObject<LiveHeartRa
     ) => {
       const reach = halo ? width : width / 2 + 0.5;
       const half = halo ? -1 : reach;
+      // A halo goes straight up and down, as wide strips fold over on tight
+      // bends; round the note, which has none that tight, it follows the line
+      const upright = halo ? 1 - morph : 0;
       for (let j = 0; j <= STEPS; j += step) {
-        // A halo goes straight up and down: wide strips fold over on tight bends
-        let ox = 0;
-        let oy = reach;
-        if (!halo) {
-          const ahead = Math.min(j + step, STEPS);
-          const behind = Math.max(j - step, 0);
-          const dy = ys[ahead] - ys[behind];
-          const run = xs[ahead] - xs[behind];
-          const scale = reach / Math.hypot(run, dy);
-          ox = -dy * scale;
-          oy = run * scale;
-        }
-        const a = (paper ? 1 : -1) * alpha * FADE[j] * (glint ? glint[j] : 1);
+        const ahead = Math.min(j + step, STEPS);
+        const behind = Math.max(j - step, 0);
+        const dy = ys[ahead] - ys[behind];
+        const run = xs[ahead] - xs[behind];
+        const scale = (reach * (1 - upright)) / (Math.hypot(run, dy) || 1);
+        const ox = -dy * scale;
+        const oy = run * scale + reach * upright;
+        // The note's halves meet end to end, so their ends must not fade
+        const a = (paper ? 1 : -1) * alpha * lerp(FADE[j], 1, morph) * (glint ? glint[j] : 1);
         if (j === 0) bridge(xs[0] - ox, ys[0] - oy);
         vertex(xs[j] - ox, ys[j] - oy, -1, half, ink[0], ink[1], ink[2], a);
         vertex(xs[j] + ox, ys[j] + oy, 1, half, ink[0], ink[1], ink[2], a);
@@ -390,7 +435,8 @@ export default function Waveform({ ratesRef }: { ratesRef: RefObject<LiveHeartRa
     // The solid flank of a ridge, from its line to the axis: lit where it
     // climbs to the right, in shadow where it falls, fading towards its foot
     const flank = (
-      xs: Float32Array, ys: Float32Array, step: number, side: number, foot: number, tint: Rgb, glow: number
+      xs: Float32Array, ys: Float32Array, step: number, side: number, foot: number, tint: Rgb, glow: number,
+      cover = 1
     ) => {
       bridge(xs[0], ys[0]);
       for (let j = 0; j <= STEPS; j += step) {
@@ -403,14 +449,14 @@ export default function Waveform({ ratesRef }: { ratesRef: RefObject<LiveHeartRa
         const deep = paper ? 0.97 : 0.8;
         vertex(
           xs[j], ys[j], 0, 1, lerp(night[0], tint[0], amount), lerp(night[1], tint[1], amount),
-          lerp(night[2], tint[2], amount), 0.95 * FADE[j]
+          lerp(night[2], tint[2], amount), 0.95 * FADE[j] * cover
         );
-        vertex(xs[j], foot, 0, 1, night[0] * deep, night[1] * deep, night[2] * deep, 0.95 * FADE[j]);
+        vertex(xs[j], foot, 0, 1, night[0] * deep, night[1] * deep, night[2] * deep, 0.95 * FADE[j] * cover);
       }
     };
 
     const launchNote = (p: number) => {
-      const { line, base, color, speed } = waves[p];
+      const { lineX, line, base, color, speed } = waves[p];
       const H = canvas.height;
       // Crests of the front ridge, away from the tapered ends
       const crests: number[] = [];
@@ -434,7 +480,7 @@ export default function Waveform({ ratesRef }: { ratesRef: RefObject<LiveHeartRa
       // vw/vh, so the flight scales with the screen
       const place = (x: number, y: number, scale: number, turn: number) =>
         `translate(calc(-50% + ${x}vw), calc(-50% + ${away * y}vh)) scale(${scale}) rotate(${turn}deg)`;
-      note.style.left = `${(j / STEPS) * 100}%`;
+      note.style.left = `${(lineX[j] / canvas.width) * 100}%`;
       note.style.top = `${(line[j] / H) * 100}%`;
       note.style.color = `hsl(${color[0]} ${color[1]}% ${color[2] + (paper ? -10 : 12)}%)`;
       // Pop out of the crest, then float off and fade
@@ -457,13 +503,32 @@ export default function Waveform({ ratesRef }: { ratesRef: RefObject<LiveHeartRa
         if (tries === 0 || Math.abs(w.line[pick] - w.base[pick]) > Math.abs(w.line[j] - w.base[j])) j = pick;
       }
       const i = nextSpark++ % SPARKS;
-      spark.x[i] = frontX[j];
+      spark.x[i] = w.lineX[j];
       spark.y[i] = w.line[j];
-      spark.vx[i] = canvas.width * (w.speed * (1.5 + 2 * Math.random()) + (Math.random() - 0.5) * 0.03);
-      spark.vy[i] = PEOPLE[p].side * canvas.height * (0.04 + 0.09 * Math.random());
+      // Off the note they fly outwards from its centre instead of along
+      const dx = w.lineX[j] - canvas.width / 2;
+      const dy = w.line[j] - (0.5 - NOTE_RISE) * canvas.height;
+      const out = (canvas.height * (0.05 + 0.1 * Math.random())) / (Math.hypot(dx, dy) || 1);
+      spark.vx[i] = lerp(canvas.width * (w.speed * (1.5 + 2 * Math.random()) + (Math.random() - 0.5) * 0.03), dx * out, morph);
+      spark.vy[i] = lerp(PEOPLE[p].side * canvas.height * (0.04 + 0.09 * Math.random()), dy * out, morph);
       spark.age[i] = 0;
       spark.life[i] = 1.4 + 1.6 * Math.random();
       spark.who[i] = p;
+    };
+    // A burst of sparks from the middle of the axis, where the two waves meet
+    const burst = (count: number) => {
+      for (let n = 0; n < count; n++) {
+        const i = nextSpark++ % SPARKS;
+        const angle = Math.random() * TAU;
+        const pace = canvas.height * (0.1 + 0.25 * Math.random());
+        spark.x[i] = canvas.width * (0.5 + (Math.random() - 0.5) * 0.2);
+        spark.y[i] = canvas.height / 2;
+        spark.vx[i] = Math.cos(angle) * pace;
+        spark.vy[i] = Math.sin(angle) * pace;
+        spark.age[i] = 0;
+        spark.life[i] = 0.7 + 0.9 * Math.random();
+        spark.who[i] = n % 2;
+      }
     };
 
     const frame = (now: number) => {
@@ -484,6 +549,27 @@ export default function Waveform({ ratesRef }: { ratesRef: RefObject<LiveHeartRa
 
       sync += ((gap === null ? 0 : 1 / (1 + (gap / 6) ** 2)) - sync) * ease(1.2);
       harmony += ((sync > 0.75 ? 1 : 0) - harmony) * ease(sync > 0.75 ? 5 : 2.5);
+      // On the same number the two are magnets: a flash and a tug towards each
+      // other at once, then again every couple of seconds while it lasts
+      const same = bpm[0] !== null && bpm[0] === bpm[1];
+      magnet += ((same ? 1 : 0) - magnet) * ease(same ? 0.3 : 1);
+      if (same && t - tugged >= MAGNET_S && !still) {
+        tugged = t;
+        tug = 1;
+        burst(24);
+      }
+      // The song arrives in a flash and the waves gather into its note over a
+      // few seconds; a new session lets them go again
+      const wanted = songRef.current;
+      if (wanted && !hadSong && !still) {
+        tug = 1;
+        burst(60);
+      }
+      hadSong = wanted;
+      tug *= Math.exp(-dt / 0.7);
+      song = clamp(song + Math.min(dt, 0.25) * (wanted ? 1 / 3 : -1 / 2), 0, 1);
+      morph = song * song * (3 - 2 * song);
+      fold = clamp(1 - 3 * song, 0, 1);
       // Within a few BPM of each other the two waves pull into step (matching
       // in the middle of the screen): the one ahead eases off and the one behind
       // hurries, neither ever turning back
@@ -508,7 +594,8 @@ export default function Waveform({ ratesRef }: { ratesRef: RefObject<LiveHeartRa
         // Above the pair's mean a wave travels faster, below it slower
         const heading = b === null || mean === null ? CRUISE : CREEP + (CRUISE - CREEP) * Math.exp(SPREAD * (b - mean));
         w.speed += (Math.min(heading, TOP_SPEED) - w.speed) * ease(1.5);
-        w.color = mix(mix(PEOPLE[p].rest, PEOPLE[p].color, w.level), PINK, sync);
+        // The note is pink whatever the two hearts read, with a trace of each
+        w.color = mix(mix(PEOPLE[p].rest, PEOPLE[p].color, w.level), PINK, Math.max(sync, 0.8 * morph));
         // The sign keeps its last figure while it fades out with the wave
         if (b !== null && b !== w.shown) {
           w.shown = b;
@@ -541,7 +628,7 @@ export default function Waveform({ ratesRef }: { ratesRef: RefObject<LiveHeartRa
           launchNote(p);
         }
         // More sparks the faster it travels and the longer the two agree
-        w.due += w.level * (8 + (12 * w.speed) / TOP_SPEED + 12 * harmony) * Math.min(dt, 0.1);
+        w.due += (w.level * (8 + (12 * w.speed) / TOP_SPEED + 12 * harmony) + 10 * morph) * Math.min(dt, 0.1);
         for (; w.due >= 1; w.due--) launchSpark(p);
       });
 
@@ -596,12 +683,13 @@ export default function Waveform({ ratesRef }: { ratesRef: RefObject<LiveHeartRa
         // Farther ridges are narrower; at rest they all fold down onto the axis,
         // so waking up only raises them and nothing slides sideways
         const scale = 1 - 0.2 * far;
-        const lift = DEPTH * (1 - (1 - far) ** 1.7) * w.level;
+        const sink = k === 0 ? 1 : fold;
+        const lift = DEPTH * (1 - (1 - far) ** 1.7) * w.level * sink;
         // The whole wave swells and settles at no fixed pace, and a swell
         // keeps rolling from the front ridge to the back
         const breath = 0.82 + 0.18 * lerp(grain(0.11 * then + seed, seed), grain(0.11 * then, SHARED), sync);
         const roll = 1 + 0.12 * Math.sin(TAU * (0.8 * far - 0.3 * t));
-        const reach = w.amp * breath * roll * (1 - 0.45 * far) * AMP * H;
+        const reach = w.amp * breath * roll * (1 - 0.45 * far) * AMP * H * sink;
         for (let c = 0; c <= FIELD; c++) {
           tall[c] = own(wander, c / FIELD, then, seed, 0);
           wide[c] = own(roam, c / FIELD, then, seed, 11);
@@ -628,8 +716,34 @@ export default function Waveform({ ratesRef }: { ratesRef: RefObject<LiveHeartRa
         }
       };
 
+      // The magnet tugs the middle of the front ridge towards the axis. The
+      // song's note gathers the ridge up, Person 1's from the left end and
+      // Person 2's from the right, each point swinging round the note's
+      // centre on its way, so the two lines spiral in and the note breathes
+      const noteY = cy - NOTE_RISE * H;
+      const span = ((NOTE_SIZE * H) / 18) * (1 + 0.02 * Math.sin(1.3 * t));
+      const shape = (p: number, xs: Float32Array, ys: Float32Array) => {
+        const pinch = 0.55 * magnet * tug;
+        const [noteXs, noteYs] = NOTE_HALVES[p];
+        for (let j = 0; j <= STEPS; j++) {
+          const x = j / STEPS;
+          if (pinch > 0.001) ys[j] = lerp(ys[j], cy, pinch * Math.exp(-(((x - 0.5) / 0.2) ** 2)));
+          if (morph <= 0) continue;
+          const along = p === 0 ? x : 1 - x;
+          const begun = clamp(1.6 * morph - 0.6 * along, 0, 1);
+          const m = begun * begun * (3 - 2 * begun);
+          const dx = lerp(xs[j], W / 2 + (noteXs[j] - 12) * span, m) - W / 2;
+          const dy = lerp(ys[j], noteY + (noteYs[j] - 12) * span, m) - noteY;
+          const turn = PEOPLE[p].side * 0.9 * Math.sin(Math.PI * m);
+          xs[j] = W / 2 + dx * Math.cos(turn) - dy * Math.sin(turn);
+          ys[j] = noteY + dx * Math.sin(turn) + dy * Math.cos(turn);
+        }
+      };
+
       filled = 0;
       const cuts: number[] = [];
+      // The note is drawn far bolder than a ridge
+      const bold = lerp(1, 12, morph);
       waves.forEach((w, p) => {
         const { side } = PEOPLE[p];
         const tint = rgb(w.color, paper ? -12 : 0);
@@ -637,30 +751,35 @@ export default function Waveform({ ratesRef }: { ratesRef: RefObject<LiveHeartRa
           // The sign goes in here, in front of the ridges already drawn
           if (k === SIGN_ROW - 1) cuts.push(filled / FLOATS);
           const front = k === 0;
-          const xs = front ? frontX : farX;
+          const xs = front ? w.lineX : farX;
           const ys = front ? w.line : farY;
-          if (front) ridge(p, 0, xs, ys, w.bell, w.base);
-          else ridge(p, k, xs, ys);
+          if (front) {
+            ridge(p, 0, xs, ys, w.bell, w.base);
+            shape(p, xs, ys);
+          } else {
+            if (fold <= 0) continue;
+            ridge(p, k, xs, ys);
+          }
           const far = k / (ROWS - 1);
           // Distant ridges are drawn with half the points
           const step = k < 4 ? 1 : 2;
-          flank(xs, ys, step, side, cy, tint, (0.6 - 0.36 * far) * (0.35 + 0.65 * w.level));
+          flank(xs, ys, step, side, cy, tint, (0.6 - 0.36 * far) * (0.35 + 0.65 * w.level), fold);
           ink = tint;
           if (!front) {
-            stroke(xs, ys, step, lerp(2.4, 1, far) * unit, lerp(0.7, 0.16, far) * (0.3 + 0.7 * w.level));
+            stroke(xs, ys, step, lerp(2.4, 1, far) * unit, lerp(0.7, 0.16, far) * (0.3 + 0.7 * w.level) * fold);
             continue;
           }
           // Light runs along the front ridge the way the wave is going
-          const flow = 0.7 * w.level * Math.min(1, w.speed / CRUISE);
+          const flow = 0.7 * Math.max(w.level, morph) * Math.min(1, w.speed / CRUISE);
           for (let j = 0; j <= STEPS; j++) {
             const u = (j / STEPS - w.sheen) * 3;
             shine[j] = 1 + flow * Math.exp(-(((u - Math.floor(u) - 0.5) / 0.12) ** 2));
           }
-          stroke(xs, ys, 1, 60 * unit, paper ? 0.04 : 0.08, true, shine);
-          stroke(xs, ys, 1, 22 * unit, paper ? 0.1 : 0.22, true, shine);
-          stroke(xs, ys, 1, 3.4 * unit, 0.95, false, shine);
+          stroke(xs, ys, 1, 60 * unit * lerp(1, 1.5, morph), (paper ? 0.04 : 0.08) * (1 + 1.5 * morph), true, shine);
+          stroke(xs, ys, 1, 22 * unit * lerp(1, 2, morph), (paper ? 0.1 : 0.22) * (1 + morph), true, shine);
+          stroke(xs, ys, 1, 3.4 * unit * bold, 0.95, false, shine);
           ink = rgb(w.color, paper ? 6 : 22);
-          stroke(xs, ys, 1, 1.2 * unit, paper ? 0.55 : 0.8, false, shine);
+          stroke(xs, ys, 1, 1.2 * unit * bold, paper ? 0.55 : 0.8, false, shine);
         }
         cuts.push(filled / FLOATS);
       });
@@ -668,21 +787,29 @@ export default function Waveform({ ratesRef }: { ratesRef: RefObject<LiveHeartRa
       // Wherever a bell of one wave faces a bell of the other, the space
       // between them lights up pink
       const together = Math.min(waves[0].level, waves[1].level);
-      const lit = together * (0.14 + 0.5 * sync + 0.22 * harmony);
+      const lit = together * (0.14 + 0.5 * sync + 0.22 * harmony) * fold;
       waves.forEach((w) => {
         const heart = rgb(mix(w.color, PINK, 0.6), paper ? -6 : 6);
-        bridge(0, w.line[0]);
+        bridge(w.lineX[0], w.line[0]);
         for (let j = 0; j <= STEPS; j++) {
           const meet = (paper ? 0.45 : -1) * lit * waves[0].bell[j] * waves[1].bell[j] * FADE[j];
-          vertex(frontX[j], w.line[j], 0, 1, heart[0], heart[1], heart[2], meet * 0.25);
-          vertex(frontX[j], cy, 0, 1, heart[0], heart[1], heart[2], meet);
+          vertex(w.lineX[j], w.line[j], 0, 1, heart[0], heart[1], heart[2], meet * 0.25);
+          vertex(w.lineX[j], cy, 0, 1, heart[0], heart[1], heart[2], meet);
         }
       });
-      // The axis they meet on glows as they get closer
+      // The axis they meet on glows as they get closer, and flares up with
+      // each tug of the magnet; under the note it dims
       axis.fill(cy);
+      const dim = 1 - 0.8 * morph;
       ink = rgb(mix(VIOLET, PINK, sync), paper ? -12 : 0);
-      stroke(frontX, axis, 1, 0.16 * H, (0.05 + 0.1 * sync + 0.08 * harmony) * (paper ? 0.5 : 1), true);
-      stroke(frontX, axis, 1, 1.4 * unit, 0.35 + 0.4 * sync);
+      stroke(frontX, axis, 1, 0.16 * H, (0.05 + 0.1 * sync + 0.08 * harmony + 0.15 * tug) * (paper ? 0.5 : 1) * dim, true);
+      stroke(frontX, axis, 1, 1.4 * unit * (1 + 2 * tug), (0.35 + 0.4 * sync + 0.5 * tug) * dim);
+      // The flash: white-hot in the middle, right across the screen's height
+      if (tug > 0.002) {
+        for (let j = 0; j <= STEPS; j++) shine[j] = Math.exp(-(((j / STEPS - 0.5) / 0.2) ** 2));
+        ink = rgb(PINK, paper ? -8 : 26);
+        stroke(frontX, axis, 1, 0.45 * H, (paper ? 0.55 : 0.85) * tug, true, shine);
+      }
       // Sparks: short streaks of light, brightest at the head
       for (let i = 0; i < SPARKS; i++) {
         if (spark.age[i] >= spark.life[i]) continue;
@@ -722,7 +849,7 @@ export default function Waveform({ ratesRef }: { ratesRef: RefObject<LiveHeartRa
         gl.bufferData(gl.ARRAY_BUFFER, quad, gl.DYNAMIC_DRAW);
         gl.bindTexture(gl.TEXTURE_2D, w.figure);
         const [r, g, b] = rgb(w.color, paper ? -16 : 8);
-        gl.uniform4f(uTint, r, g, b, opacity * w.level * (0.8 + 0.4 * w.flash));
+        gl.uniform4f(uTint, r, g, b, opacity * w.level * fold * (0.8 + 0.4 * w.flash));
         gl.uniform1f(uPaint, paper ? 1 : 0);
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       };
@@ -758,7 +885,7 @@ export default function Waveform({ ratesRef }: { ratesRef: RefObject<LiveHeartRa
       gl.deleteProgram(strips);
       gl.deleteProgram(signs);
     };
-  }, [ratesRef]);
+  }, [ratesRef, songRef]);
 
   return (
     <div ref={stageRef} aria-hidden className="pointer-events-none absolute inset-0">

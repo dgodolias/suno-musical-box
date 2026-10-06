@@ -8,7 +8,9 @@ import {
   HEART_RATE_CHANNEL,
   type HeartRateMessage,
   type LiveHeartRates,
+  type SessionPlan,
 } from "@/lib/heart-rate-channel";
+import { placebo } from "@/lib/progress";
 
 // The page's colour mode, with a faint glow along the waves
 const BACKDROP =
@@ -36,11 +38,45 @@ function startReplay(replay: Replay, ratesRef: RefObject<LiveHeartRates>) {
   return () => clearInterval(timer);
 }
 
+// How long into a replay the song arrives, with ?song, a little later than
+// its bar expects
+const REPLAY_SONG_MS = 15000;
+
+// The wait for the song, filling from one edge of the screen to the other
+// under the waves: no figure, just how far along it is. Once the song comes
+// it fills up and goes
+function WaitBar({ plan, done }: { plan: SessionPlan; done: boolean }) {
+  const [share, setShare] = useState(() => placebo(Date.now() - plan.startedAt, plan.expectedMs));
+  useEffect(() => {
+    const timer = setInterval(() => setShare(placebo(Date.now() - plan.startedAt, plan.expectedMs)), 200);
+    return () => clearInterval(timer);
+  }, [plan]);
+  return (
+    <div
+      className={`absolute inset-x-0 bottom-[11vh] h-[0.5vh] min-h-[3px] bg-primary/15 ${
+        done ? "animate-out fade-out fill-mode-forwards delay-700 duration-1000" : "animate-in fade-in duration-700"
+      }`}
+    >
+      <div
+        className="h-full transition-[clip-path] duration-500 ease-linear"
+        style={{
+          clipPath: `inset(0 ${100 - (done ? 100 : share)}% 0 0)`,
+          background: "linear-gradient(90deg, hsl(358 96% 58%), hsl(322 95% 68%), hsl(214 98% 58%))",
+          boxShadow: "0 0 1vh hsl(322 95% 68% / 0.6)",
+        }}
+      />
+    </div>
+  );
+}
+
 // Full-screen display for a TV: only the waves, fed by the Musical Box page
 // open in another window of the same browser. Double-click for full screen.
 // With `replay` (?mock) it plays a recorded session instead.
-export default function SyncWave({ replay }: { replay?: Replay | null }) {
+export default function SyncWave({ replay, song = false }: { replay?: Replay | null; song?: boolean }) {
   const ratesRef = useRef<LiveHeartRates>([null, null]);
+  const songRef = useRef(false);
+  const [ready, setReady] = useState(false);
+  const [plan, setPlan] = useState<SessionPlan | null>(null);
   const [unlinked, setUnlinked] = useState(false);
   const [awake, setAwake] = useState(false);
 
@@ -60,13 +96,38 @@ export default function SyncWave({ replay }: { replay?: Replay | null }) {
   }, []);
 
   useEffect(() => {
-    if (replay !== undefined) return replay ? startReplay(replay, ratesRef) : undefined;
+    // The waves become the song's note while it is ready, with its words below
+    const arrive = (on: boolean) => {
+      songRef.current = on;
+      setReady(on);
+    };
+    if (replay !== undefined) {
+      if (!replay) return;
+      const stop = startReplay(replay, ratesRef);
+      if (!song) return stop;
+      // The bar expects the song a little before it comes
+      const begun = Date.now();
+      const bar = setTimeout(() => setPlan({ startedAt: begun, expectedMs: 0.8 * REPLAY_SONG_MS }));
+      const timer = setTimeout(() => arrive(true), REPLAY_SONG_MS);
+      return () => {
+        stop();
+        clearTimeout(bar);
+        clearTimeout(timer);
+      };
+    }
     const channel = new BroadcastChannel(HEART_RATE_CHANNEL);
     // No answer means the Musical Box page is not open in this browser
     const hint = setTimeout(() => setUnlinked(true), 1500);
     channel.onmessage = (event: MessageEvent<HeartRateMessage>) => {
-      if (event.data.type !== "rates") return;
-      ratesRef.current = event.data.rates;
+      const message = event.data;
+      if (message.type !== "rates") return;
+      ratesRef.current = message.rates;
+      // A new plan only when it changes, so the bar does not restart
+      setPlan((current) =>
+        current?.startedAt === message.plan?.startedAt && current?.expectedMs === message.plan?.expectedMs
+          ? current : message.plan
+      );
+      arrive(message.song);
       clearTimeout(hint);
       setUnlinked(false);
     };
@@ -75,7 +136,7 @@ export default function SyncWave({ replay }: { replay?: Replay | null }) {
       clearTimeout(hint);
       channel.close();
     };
-  }, [replay]);
+  }, [replay, song]);
 
   const toggleFullscreen = () => {
     if (document.fullscreenElement) void document.exitFullscreen();
@@ -89,7 +150,29 @@ export default function SyncWave({ replay }: { replay?: Replay | null }) {
       className="fixed inset-0 overflow-hidden select-none"
       style={{ background: BACKDROP }}
     >
-      <Waveform ratesRef={ratesRef} />
+      <Waveform ratesRef={ratesRef} songRef={songRef} />
+      {plan && <WaitBar plan={plan} done={ready} />}
+      {ready && (
+        <div
+          key="ready"
+          className="absolute inset-x-0 top-[73vh] px-4 text-center animate-in fade-in slide-in-from-bottom-6 fill-mode-both delay-[2400ms] duration-1000 ease-out"
+        >
+          <p
+            className="font-display text-[clamp(30px,4.4vw,88px)] leading-tight font-bold tracking-tight text-transparent"
+            style={{
+              backgroundImage: "linear-gradient(90deg, hsl(358 96% 62%), hsl(322 95% 66%), hsl(214 98% 62%))",
+              backgroundClip: "text",
+              WebkitBackgroundClip: "text",
+              filter: "drop-shadow(0 0 1.2vw hsl(322 95% 68% / 0.45))",
+            }}
+          >
+            Your song is ready!
+          </p>
+          <p className="mx-auto mt-[1.2vh] max-w-[70vw] text-[clamp(14px,1.5vw,30px)] text-muted-foreground">
+            Two hearts met, fell into the same rhythm, and wrote this song together.
+          </p>
+        </div>
+      )}
       <div
         onDoubleClick={(event) => event.stopPropagation()}
         className={`absolute top-[3vh] right-[3vw] transition-opacity duration-500 ${

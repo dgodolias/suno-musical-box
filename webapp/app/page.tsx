@@ -11,7 +11,8 @@ import ThemeToggle from "@/components/theme-toggle";
 import { Tv } from "lucide-react";
 import type { RingConnection, RingData } from "@/lib/ble/ring-manager";
 import { HEART_RATE_CHANNEL } from "@/lib/heart-rate-channel";
-import type { HeartRateMessage, LiveHeartRates } from "@/lib/heart-rate-channel";
+import type { HeartRateMessage, LiveHeartRates, SessionPlan } from "@/lib/heart-rate-channel";
+import { placebo } from "@/lib/progress";
 import type { BiometricReading } from "@/lib/biometrics";
 import { computeSnapshot } from "@/lib/biometrics";
 import { buildPrompt } from "@/lib/prompt-builder";
@@ -25,8 +26,10 @@ const WINDOW_SEC = 30;
 // bar appears, part of the wait has already gone by
 const MUSIC_AT_SEC = 20;
 // A 3-minute V6 song was ready 37-40 s after the request in the 2026-10-06
-// benchmark; the bar reaches 90% at this point, then creeps towards 99%
+// benchmark; the music bar reaches its expected share at this point (placebo)
 const SONG_EXPECTED_SEC = 40;
+// The whole wait from Start to the song, for the bar on the SyncWave display
+const PLAN_MS = Math.max(WINDOW_SEC, MUSIC_AT_SEC + SONG_EXPECTED_SEC) * 1000;
 const POLL_MS = 3000;
 const POLL_ATTEMPTS = 100; // five minutes
 const CURRENT_SESSION_KEY = "musical-box-current-session";
@@ -111,14 +114,24 @@ export default function Home() {
   const generatingRef = useRef(false);
   const generationRunRef = useRef(0);
   const liveHrRef = useRef<LiveHeartRates>([null, null]);
+  const planRef = useRef<SessionPlan | null>(null);
+  const songReadyRef = useRef(false);
   const channelRef = useRef<BroadcastChannel | null>(null);
   const mockTickRef = useRef(0);
   const anyConnected = mockMode || ring1Connected || ring2Connected;
 
-  // Live heart rates for the SyncWave display (/syncwave) in another window
+  // Live heart rates for the SyncWave display (/syncwave) in another window,
+  // with the wait for the song and whether it has come
   const publishRates = useCallback(() => {
-    channelRef.current?.postMessage({ type: "rates", rates: liveHrRef.current } satisfies HeartRateMessage);
+    channelRef.current?.postMessage({
+      type: "rates", rates: liveHrRef.current, plan: planRef.current, song: songReadyRef.current,
+    } satisfies HeartRateMessage);
   }, []);
+  // No song is coming any more: the display's bar goes
+  const dropPlan = useCallback(() => {
+    planRef.current = null;
+    publishRates();
+  }, [publishRates]);
 
   useEffect(() => {
     const channel = new BroadcastChannel(HEART_RATE_CHANNEL);
@@ -157,6 +170,9 @@ export default function Home() {
         if (!mounted) return;
         if (previous && !previous.retired) {
           activeSessionRef.current = previous;
+          // A song is still to come only if the request was not interrupted
+          planRef.current = previous.endedAt === null && !previous.generationAttempted
+            ? { startedAt: previous.startedAt, expectedMs: PLAN_MS } : null;
           setClientSessionId(previous.clientSessionId);
           setGenre1(previous.genre1);
           setGenre2(previous.genre2);
@@ -252,10 +268,7 @@ export default function Home() {
     const progressTimer = setInterval(() => {
       if (generationRunRef.current !== run) { clearInterval(progressTimer); return; }
       // Counted from the request, so the bar is already under way when it appears
-      const elapsed = (Date.now() - requestedAt) / 1000;
-      const late = elapsed - SONG_EXPECTED_SEC;
-      const progress = late <= 0 ? (elapsed / SONG_EXPECTED_SEC) * 90 : 90 + (9 * late) / (late + 10);
-      setGenerationProgress(Math.min(99, Math.round(progress)));
+      setGenerationProgress(Math.round(placebo(Date.now() - requestedAt, SONG_EXPECTED_SEC * 1000)));
     }, 500);
     try {
       for (let attempt = 0; attempt < POLL_ATTEMPTS; attempt++) {
@@ -272,6 +285,9 @@ export default function Home() {
           const windowEnd = (activeSessionRef.current?.startedAt ?? 0) + WINDOW_SEC * 1000;
           if (Date.now() < windowEnd) await new Promise((resolve) => setTimeout(resolve, windowEnd - Date.now()));
           if (generationRunRef.current !== run) return;
+          // The SyncWave display turns into the song's note
+          songReadyRef.current = true;
+          publishRates();
           setCurrentSong({ taskId, audioUrl: data.audioUrl, prompt, style, number: 1 });
           setGenerationStatus("");
           setGenerationProgress(100);
@@ -284,9 +300,12 @@ export default function Home() {
       if (generationRunRef.current === run) setGenerationStatus("Music unavailable; recording continues. " + String(error));
     } finally {
       clearInterval(progressTimer);
-      if (generationRunRef.current === run) setGenerationProgress(0);
+      if (generationRunRef.current === run) {
+        setGenerationProgress(0);
+        if (!songReadyRef.current) dropPlan();
+      }
     }
-  }, [finishSession]);
+  }, [finishSession, publishRates, dropPlan]);
 
   const generateSong = useCallback(async () => {
     const session = activeSessionRef.current;
@@ -314,16 +333,19 @@ export default function Home() {
         body: JSON.stringify({ sessionId: saved.serverSessionId, prompt, style, snapshot }),
       });
       if (generationRunRef.current !== run) return;
-      if (response.status === 423) { setGenerationStatus(MUSIC_CONFIG_MESSAGE); return; }
+      if (response.status === 423) { setGenerationStatus(MUSIC_CONFIG_MESSAGE); dropPlan(); return; }
       if (!response.ok) throw new Error(`Music request failed (${response.status})`);
       const data = await response.json();
       if (generationRunRef.current !== run) return;
       if (!data.taskId) throw new Error("Music service did not return a task ID");
       void pollForSong(data.taskId, prompt, style, run, requestedAt);
     } catch (error) {
-      if (generationRunRef.current === run) setGenerationStatus("Music unavailable; recording continues. " + String(error));
+      if (generationRunRef.current === run) {
+        setGenerationStatus("Music unavailable; recording continues. " + String(error));
+        dropPlan();
+      }
     }
-  }, [pollForSong]);
+  }, [pollForSong, dropPlan]);
 
   const startSession = useCallback(async () => {
     const outbox = outboxRef.current;
@@ -340,6 +362,9 @@ export default function Home() {
       await outbox.createSession(session);
       sessionStorage.setItem(CURRENT_SESSION_KEY, session.clientSessionId);
       activeSessionRef.current = session;
+      // The display's bar starts filling
+      planRef.current = { startedAt: session.startedAt, expectedMs: PLAN_MS };
+      publishRates();
       // Preserve callbacks received while IndexedDB was committing the parent.
       for (const reading of startingReadingsRef.current.readings) {
         void outbox.append(session.clientSessionId, reading)
@@ -359,13 +384,14 @@ export default function Home() {
     } catch (error) {
       setSessionError("Could not start local recording: " + String(error));
     } finally { startingSessionRef.current = false; startingReadingsRef.current = null; }
-  }, [sync.ready, initialized, mockMode, genre1, genre2]);
+  }, [sync.ready, initialized, mockMode, genre1, genre2, publishRates]);
 
   const stopSession = useCallback(async () => {
     setGenerationStatus("");
     setGenerationProgress(0);
+    dropPlan();
     await finishSession();
-  }, [finishSession]);
+  }, [finishSession, dropPlan]);
 
   const newSession = useCallback(async () => {
     const session = activeSessionRef.current;
@@ -380,6 +406,9 @@ export default function Home() {
       setElapsedSeconds(0);
       setEndPersisted(false);
       setCurrentSong(null);
+      // ...and the SyncWave display returns to its waves
+      songReadyRef.current = false;
+      dropPlan();
       setGenerationStatus("");
       setGenerationProgress(0);
       setGenre1(null);
@@ -391,7 +420,7 @@ export default function Home() {
     } catch (error) {
       setSessionError("Could not prepare a new session: " + String(error));
     }
-  }, [endPersisted]);
+  }, [endPersisted, dropPlan]);
 
   useEffect(() => {
     if (!isActive) return;

@@ -125,6 +125,7 @@ function pageHarness({ mockSuno = false, mockBiometrics = false, demo = false, s
     "@/components/theme-toggle": { default: "ThemeToggle" },
     "lucide-react": { Tv: "Tv" },
     "@/lib/heart-rate-channel": loadModule("lib/heart-rate-channel.ts"),
+    "@/lib/progress": loadModule("lib/progress.ts"),
     "@/lib/biometrics": biometrics,
     "@/lib/prompt-builder": { buildPrompt: () => ({ prompt: "genres", style: "genres" }) },
   };
@@ -320,8 +321,8 @@ test("music is requested at 20 s but shown from 30 s, with its bar already under
   assert.equal(page.session().status, "Recording biometric data...");
   await page.advance(10000);
   // 11 s after the request, against an expected 40 s
-  assert.ok(page.player().generationProgress >= 23, `progress ${page.player().generationProgress}`);
-  assert.ok(page.player().generationProgress <= 27, `progress ${page.player().generationProgress}`);
+  assert.ok(page.player().generationProgress >= 21, `progress ${page.player().generationProgress}`);
+  assert.ok(page.player().generationProgress <= 23, `progress ${page.player().generationProgress}`);
   assert.equal(page.player().generationStatus, "Generating music... Recording continues.");
   assert.equal(page.session().collectSeconds, 30);
 });
@@ -347,9 +348,10 @@ test("the music bar follows the measured Suno time and keeps creeping if it runs
   await page.start();
   await page.advance(60000);
   // 40 s after the request: the expected time
-  assert.equal(page.player().generationProgress, 90);
+  assert.equal(page.player().generationProgress, 80);
   await page.advance(60000);
-  assert.ok(page.player().generationProgress > 90 && page.player().generationProgress <= 99);
+  // A minute late: well past 80%, with room left to keep moving
+  assert.ok(page.player().generationProgress >= 88 && page.player().generationProgress <= 92, `progress ${page.player().generationProgress}`);
   assert.ok(page.requests.filter((request) => request.url === "/api/generate/slow").length >= 25);
 });
 
@@ -602,11 +604,11 @@ test("fresh callbacks during slow local session creation are retained from Start
 test("live heart rates reach the SyncWave display, which can ask for them", async () => {
   const page = pageHarness();
   await page.settle();
-  assert.deepEqual(page.broadcasts.at(-1), { type: "rates", rates: [null, null] });
+  assert.deepEqual(page.broadcasts.at(-1), { type: "rates", rates: [null, null], plan: null, song: false });
   page.reading(1, 72);
   page.reading(2, 81, page.now - 500);
   assert.deepEqual(page.broadcasts.at(-1), {
-    type: "rates", rates: [{ bpm: 72, at: page.now }, { bpm: 81, at: page.now - 500 }],
+    type: "rates", rates: [{ bpm: 72, at: page.now }, { bpm: 81, at: page.now - 500 }], plan: null, song: false,
   });
   const sent = page.broadcasts.length;
   page.hello();
@@ -614,5 +616,45 @@ test("live heart rates reach the SyncWave display, which can ask for them", asyn
   assert.deepEqual(page.broadcasts.at(-1).rates.map((rate) => rate?.bpm), [72, 81]);
   page.ring(2).onConnectionChange(2, false);
   assert.deepEqual(page.broadcasts.at(-1).rates.map((rate) => rate?.bpm ?? null), [72, null]);
+  page.unmount();
+});
+
+test("the SyncWave display hears of the wait from Start, that the song is ready, and that a new session began", async () => {
+  const page = pageHarness();
+  page.generationResponses.push({ ok: true, json: async () => ({ taskId: "song" }) });
+  page.pollResponses.push({ ok: true, json: async () => ({ status: "ready", audioUrl: "https://test.invalid/song.mp3" }) });
+  await page.start();
+  const startedAt = [...page.storage.sessions.values()][0].startedAt;
+  // The wait is the recording plus the measured Suno time, from the page's own timings
+  assert.deepEqual(page.broadcasts.at(-1).plan, { startedAt, expectedMs: 60000 });
+  for (let i = 0; i < 5; i++) { page.reading(1, 70); page.reading(2, 80); }
+  await page.advance(25000);
+  assert.equal(page.broadcasts.at(-1).song, false);
+  assert.deepEqual(page.broadcasts.at(-1).plan, { startedAt, expectedMs: 60000 });
+  await page.advance(6000);
+  assert.equal(page.player().currentSong.taskId, "song");
+  assert.equal(page.broadcasts.at(-1).song, true);
+  await page.next();
+  assert.equal(page.player().currentSong, null);
+  assert.equal(page.broadcasts.at(-1).song, false);
+  assert.equal(page.broadcasts.at(-1).plan, null);
+  page.unmount();
+});
+
+test("the display's wait ends with Stop, or when no song is coming", async () => {
+  const page = pageHarness();
+  await page.start();
+  assert.notEqual(page.broadcasts.at(-1).plan, null);
+  await page.stop();
+  assert.equal(page.broadcasts.at(-1).plan, null);
+  await page.next();
+  page.generationResponses.push({ ok: false, status: 500, json: async () => ({}) });
+  await page.start();
+  for (let i = 0; i < 5; i++) { page.reading(1, 70); page.reading(2, 80); }
+  await page.advance(19000);
+  assert.notEqual(page.broadcasts.at(-1).plan, null);
+  await page.advance(2000);
+  assert.equal(page.generations().length, 1);
+  assert.equal(page.broadcasts.at(-1).plan, null);
   page.unmount();
 });
