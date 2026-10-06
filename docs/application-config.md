@@ -8,7 +8,7 @@ Both flags default to `false`:
 | `USE_MOCK_BIOMETRICS` | Real Bluetooth ring measurements | Synthetic readings, explicitly labelled in the UI |
 
 The web app reads the flags at Next.js startup/build. Vercel environment variables
-and `webapp/.env*` take precedence; the repository root `.env` is a local fallback.
+and `webapp/.env*` take precedence (locally they are in `webapp/.env.local`); a repository root `.env` would be a local fallback.
 Only these two non-secret flags are bundled into the browser. Restart the local
 dev server after changing them; on Vercel, redeploy after changing Config values.
 The root `.env` is not consulted on Vercel. Invalid values fail startup/build.
