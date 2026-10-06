@@ -1,8 +1,11 @@
 import { NextResponse } from "next/server";
 import { insertSong } from "@/lib/db";
 
-// V6 defaults to 20s clips when duration is omitted
-const SONG_DURATION_SEC = 60;
+// A full-length song. Measured on 2026-10-06 with V6: every request costs 12
+// credits whatever the length (60, 180 or 240 s, or none), 180 s songs were
+// ready in about 40 s, 240 s ones in about 54 s. Without a duration V6 picks
+// its own (about 3 min), despite the docs' "default 20".
+const SONG_DURATION_SEC = 180;
 
 export async function POST(request: Request) {
   const body = await request.json();

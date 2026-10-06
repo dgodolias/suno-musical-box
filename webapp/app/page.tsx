@@ -24,9 +24,9 @@ const WINDOW_SEC = 30;
 // the page keeps showing the recording until WINDOW_SEC: by the time the music
 // bar appears, part of the wait has already gone by
 const MUSIC_AT_SEC = 20;
-// Suno (chirp-hawk) had the first track ready 10-20 s after the request on
-// 2026-10-06; the bar reaches 90% at this point, then creeps towards 99%
-const SONG_EXPECTED_SEC = 24;
+// A 3-minute V6 song was ready 37-40 s after the request in the 2026-10-06
+// benchmark; the bar reaches 90% at this point, then creeps towards 99%
+const SONG_EXPECTED_SEC = 40;
 const POLL_MS = 3000;
 const POLL_ATTEMPTS = 100; // five minutes
 const CURRENT_SESSION_KEY = "musical-box-current-session";

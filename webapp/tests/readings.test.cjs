@@ -319,9 +319,9 @@ test("music is requested at 20 s but shown from 30 s, with its bar already under
   assert.equal(page.player().generationStatus, "Recording biometric data...");
   assert.equal(page.session().status, "Recording biometric data...");
   await page.advance(10000);
-  // 11 s after the request, against an expected 24 s
-  assert.ok(page.player().generationProgress >= 40, `progress ${page.player().generationProgress}`);
-  assert.ok(page.player().generationProgress <= 45, `progress ${page.player().generationProgress}`);
+  // 11 s after the request, against an expected 40 s
+  assert.ok(page.player().generationProgress >= 23, `progress ${page.player().generationProgress}`);
+  assert.ok(page.player().generationProgress <= 27, `progress ${page.player().generationProgress}`);
   assert.equal(page.player().generationStatus, "Generating music... Recording continues.");
   assert.equal(page.session().collectSeconds, 30);
 });
@@ -345,8 +345,8 @@ test("the music bar follows the measured Suno time and keeps creeping if it runs
   const page = pageHarness();
   page.generationResponses.push({ ok: true, json: async () => ({ taskId: "slow" }) });
   await page.start();
-  await page.advance(44000);
-  // 24 s after the request: the expected time
+  await page.advance(60000);
+  // 40 s after the request: the expected time
   assert.equal(page.player().generationProgress, 90);
   await page.advance(60000);
   assert.ok(page.player().generationProgress > 90 && page.player().generationProgress <= 99);
