@@ -517,16 +517,27 @@ export default function Home() {
           </div>
         </div>
 
-        <div role="status" aria-label="Application configuration" className="rounded-xl border border-primary/30 bg-primary/10 px-4 py-3 text-sm font-medium">
-          Music: {MOCK_SUNO ? "Mock (no credits)" : "Suno (live)"} &middot; Biometrics: {mockMode ? "Mock (synthetic)" : "Live rings"}
-        </div>
-
-        <div role="status" aria-label="Recording storage" className="rounded-xl border border-border/60 bg-card px-4 py-3 text-sm space-y-1">
-          <p className="font-medium">{isActive ? "Recording" : clientSessionId ? "Session finished" : "Session"} · {saveStatus}</p>
-          {clientSessionId && <p>{elapsedSeconds}s · Person 1: {currentRecording?.person1Count ?? 0} · Person 2: {currentRecording?.person2Count ?? 0} measurements</p>}
-          {(sync.networkError || sync.storageError || sessionError) && <p className="text-destructive">{sessionError || sync.storageError || sync.networkError}</p>}
-          {sync.localWrites > 0 && <p>Some measurements are only in memory. Keep this tab open until local saving finishes.</p>}
-          {sync.pendingReadings > 0 && sync.localWrites === 0 && <p>Pending measurements are kept on this device and retried automatically.</p>}
+        {/* Setup and saving, folded away until wanted; a problem someone has to
+            act on shows below it */}
+        <div className="space-y-2">
+          <details className="text-xs text-muted-foreground">
+            <summary className="w-fit cursor-pointer select-none font-medium hover:text-foreground">Session details</summary>
+            <div className="mt-2 space-y-2">
+              <div role="status" aria-label="Application configuration" className="rounded-lg border border-border/60 bg-card/60 px-3 py-2">
+                Music: {MOCK_SUNO ? "Mock (no credits)" : "Suno (live)"} &middot; Biometrics: {mockMode ? "Mock (synthetic)" : "Live rings"}
+              </div>
+              <div role="status" aria-label="Recording storage" className="rounded-lg border border-border/60 bg-card/60 px-3 py-2 space-y-1">
+                <p className="font-medium">{isActive ? "Recording" : clientSessionId ? "Session finished" : "Session"} · {saveStatus}</p>
+                {clientSessionId && <p>{elapsedSeconds}s · Person 1: {currentRecording?.person1Count ?? 0} · Person 2: {currentRecording?.person2Count ?? 0} measurements</p>}
+                {(sync.networkError || sync.storageError || sessionError) && <p className="text-destructive">{sessionError || sync.storageError || sync.networkError}</p>}
+                {sync.localWrites > 0 && <p>Some measurements are only in memory. Keep this tab open until local saving finishes.</p>}
+                {sync.pendingReadings > 0 && sync.localWrites === 0 && <p>Pending measurements are kept on this device and retried automatically.</p>}
+              </div>
+            </div>
+          </details>
+          {(sessionError || sync.storageError) && (
+            <p role="alert" className="text-sm text-destructive">{sessionError || sync.storageError}</p>
+          )}
         </div>
 
         {/* Ring cards: each person's ring by the name Chrome lists it under */}
