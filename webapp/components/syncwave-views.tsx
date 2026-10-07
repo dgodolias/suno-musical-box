@@ -29,6 +29,8 @@ export interface Layout {
     glow: boolean; // drawn as light over the picture
     fade: boolean; // their top melts into the picture above
   };
+  // A second set of waves (Frame): its own top and bottom
+  second?: { top: number; bottom: number };
 }
 
 const STACK: Layout = {
@@ -52,6 +54,15 @@ const POSTER: Layout = {
   ambient: 0.6,
   waves: { top: 21, bottom: 34, side: 14, glow: true, fade: false },
 };
+// The picture between the two hearts: a set of waves on each edge of it, the
+// red rising from its top and the blue hanging from its bottom (the picture
+// hides the other half of each)
+const FRAME: Layout = {
+  photo: { top: 18, height: 64, card: true, dim: 1, fade: false, soft: false, above: true },
+  ambient: 0,
+  waves: { top: 0, bottom: 64, side: 0, glow: false, fade: false },
+  second: { top: 64, bottom: 0 },
+};
 // Whatever the view, the song's note gets the stage, under the picture
 export const SONG_LAYOUT: Layout = {
   photo: { top: 4, height: 34, card: true, dim: 1, fade: false, soft: false, above: true },
@@ -64,9 +75,8 @@ export const VIEWS = [
   { name: "Overlay", hint: "The waves drawn in light over the whole picture", layout: OVERLAY },
   { name: "Card", hint: "The waves on their own backdrop, the picture as a card", layout: CARD },
   { name: "Poster", hint: "The live waves over the poster's own", layout: POSTER },
-  { name: "Tide", hint: "Stack and Card in turn", layout: STACK },
+  { name: "Frame", hint: "The red wave above the picture, the blue below", layout: FRAME },
 ] as const;
-export const TIDE_LAYOUTS = [STACK, CARD];
 
 // The chosen view: ?view=N, else the last one chosen in this browser
 const VIEW_KEY = "musical-box-syncwave-view";
@@ -190,8 +200,8 @@ export function Photo({ layout }: { layout: Layout }) {
 }
 
 /** Where the waves are drawn; they resize as the view changes. */
-export function WavesFrame({ layout, children }: { layout: Layout; children: ReactNode }) {
-  const { waves } = layout;
+export function WavesFrame({ layout, second = false, children }: { layout: Layout; second?: boolean; children: ReactNode }) {
+  const waves = second && layout.second ? { ...layout.waves, ...layout.second } : layout.waves;
   const mask = waves.fade ? "linear-gradient(to bottom, transparent, #000 30%)" : "none";
   return (
     <div

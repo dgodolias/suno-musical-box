@@ -5,7 +5,7 @@ import ThemeToggle from "@/components/theme-toggle";
 import WaitingMusic from "@/components/waiting-music";
 import { DEFAULT_VOLUME } from "@/lib/waiting-music";
 import Waveform from "@/components/waveform";
-import { Photo, SONG_LAYOUT, TIDE_LAYOUTS, VIEWS, ViewPicker, WavesFrame, useView } from "@/components/syncwave-views";
+import { Photo, SONG_LAYOUT, VIEWS, ViewPicker, WavesFrame, useView } from "@/components/syncwave-views";
 import type { Replay } from "@/lib/db";
 import {
   HEART_RATE_CHANNEL,
@@ -44,8 +44,6 @@ function startReplay(replay: Replay, ratesRef: RefObject<LiveHeartRates>) {
 // How long into a replay the song arrives, with ?song, a little later than
 // its bar expects
 const REPLAY_SONG_MS = 15000;
-// Tide: how long the picture, then the waves, hold the front
-const TIDE_MS = 20000;
 
 // The wait for the song, filling from one edge of the screen to the other
 // under the waves: no figure, just how far along it is. Once the song comes
@@ -90,7 +88,6 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
   const [awake, setAwake] = useState(false);
   // The picture is always on screen; the view decides where, and where the waves go
   const view = useView();
-  const [tideTurn, setTideTurn] = useState(0);
 
   // The colour mode switch shows while the mouse moves, then gets out of the way
   useEffect(() => {
@@ -152,12 +149,7 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
     };
   }, [replay, song]);
 
-  useEffect(() => {
-    if (view !== 5) return;
-    const timer = setInterval(() => setTideTurn((turn) => 1 - turn), TIDE_MS);
-    return () => clearInterval(timer);
-  }, [view]);
-  const layout = ready ? SONG_LAYOUT : view === 5 ? TIDE_LAYOUTS[tideTurn] : VIEWS[view - 1].layout;
+  const layout = ready ? SONG_LAYOUT : VIEWS[view - 1].layout;
 
   const toggleFullscreen = () => {
     if (document.fullscreenElement) void document.exitFullscreen();
@@ -177,6 +169,11 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
       <WavesFrame layout={layout}>
         <Waveform ratesRef={ratesRef} songRef={songRef} glow={layout.waves.glow} />
       </WavesFrame>
+      {layout.second && (
+        <WavesFrame layout={layout} second>
+          <Waveform ratesRef={ratesRef} songRef={songRef} glow={layout.waves.glow} />
+        </WavesFrame>
+      )}
       {/* The waiting music plays here, fading out as the song starts on the
           Musical Box page */}
       <WaitingMusic playing={!ready} volume={musicVolume} round={round} onBlocked={setMusicBlocked} />

@@ -26,6 +26,10 @@ const CREEP = 0.035; // the slowest a wave ever goes
 const TOP_SPEED = 0.15;
 const SPREAD = 0.1; // how strongly each bpm above or below the pair's mean changes the speed
 const REST_BPM = 50;
+// Two people at rest are rarely more than a few BPM apart, so the waves turn
+// pink only within about this much of each other, and red stays red and blue
+// blue otherwise (their motion still draws together from further off)
+const PINK_GAP = 1.2;
 const REST_AMP = 0.05;
 const SHARED = 7.7; // seed of the shape both waves take once in sync
 const SPARKS = 90;
@@ -307,6 +311,7 @@ export default function Waveform({
     let night = BACKDROPS.midnight;
     let sync = 0; // 0 = apart, 1 = the two hearts agree
     let harmony = 0; // builds up while they stay in sync
+    let blend = 0; // how pink the two waves are: only as they all but agree
     let magnet = 0; // 1 while both read the same number
     let tug = 0; // the latest pull of the magnet, fading
     let tugged = -Infinity; // when it was
@@ -465,6 +470,9 @@ export default function Waveform({
       last = now;
       const t = still ? 0 : (now - opened) / 1000;
       const ease = (tau: number) => 1 - Math.exp(-dt / tau);
+      // Bells keep their shape in any frame: a wider one than the 16:9 screen
+      // fits more of them, rather than stretching each
+      const fit = clamp(canvas.width / Math.max(1, canvas.height) / (16 / 9), 0.6, 4);
       // The colour mode the page is in (next-themes puts it on <html>)
       const modes = document.documentElement.classList;
       const mode = modes.contains("midnight") ? "midnight" : modes.contains("dark") ? "dark" : "light";
@@ -478,6 +486,7 @@ export default function Waveform({
       const mean = bpm[0] !== null && bpm[1] !== null ? (bpm[0] + bpm[1]) / 2 : null;
 
       sync += ((gap === null ? 0 : 1 / (1 + (gap / 6) ** 2)) - sync) * ease(1.2);
+      blend += ((gap === null ? 0 : Math.exp(-((gap / PINK_GAP) ** 2))) - blend) * ease(1.5);
       harmony += ((sync > 0.75 ? 1 : 0) - harmony) * ease(sync > 0.75 ? 5 : 2.5);
       // On the same number the two are magnets: a flash and a tug towards each
       // other at once, then again every couple of seconds while it lasts
@@ -524,13 +533,13 @@ export default function Waveform({
         // Above the pair's mean a wave travels faster, below it slower
         const heading = b === null || mean === null ? CRUISE : CREEP + (CRUISE - CREEP) * Math.exp(SPREAD * (b - mean));
         w.speed += (Math.min(heading, TOP_SPEED) - w.speed) * ease(1.5);
-        // The note is pink whatever the two hearts read, with a trace of each
-        w.color = mix(mix(PEOPLE[p].rest, PEOPLE[p].color, w.level), PINK, Math.max(sync, 0.8 * morph));
+        // Pink as they agree, and in the song's note, always with a trace of each
+        w.color = mix(mix(PEOPLE[p].rest, PEOPLE[p].color, w.level), PINK, 0.8 * Math.max(blend, morph));
         if (still) return;
         // Bells travel right. When they get denser they close up towards the
         // right edge, and when sparser they spread out from the left one, so
         // none ever slides back to the left
-        const bells = w.bpm / BPM_PER_BELL;
+        const bells = (w.bpm / BPM_PER_BELL) * fit;
         w.offset += w.speed * bells * Math.min(dt, 0.25) * (1 + (p === 0 ? pull : -pull)) + Math.max(0, bells - w.bells);
         w.bells = bells;
         w.pastAt.push(now);

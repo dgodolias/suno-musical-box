@@ -2,7 +2,11 @@ import nodemailer from "nodemailer";
 
 export const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-/** Downloads the song and emails it as an MP3 attachment via Zoho SMTP. */
+const escape = (text: string) =>
+  text.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] ?? c);
+
+/** Downloads the song and emails it as an MP3 attachment via Zoho SMTP, with
+ * Athens Voice's copy for "Πιαστείτε στα χέρια". */
 export async function sendSongEmail(opts: {
   to: string;
   audioUrl: string;
@@ -32,9 +36,34 @@ export async function sendSongEmail(opts: {
     const result = await transport.sendMail({
       from: { name: "Athens Voice", address: user },
       to: opts.to,
-      subject: "Your song from the Musical Box 🎵",
-      text: "Hello!\n\nHere is the song you created at the Musical Box. You will find it attached to this email.\n\n— The Athens Voice team",
-      html: "<p>Hello!</p><p>Here is the song you created at the Musical Box. You will find it attached to this email.</p><p>— The Athens Voice team</p>",
+      subject: "Η μουσική σας από το «Πιαστείτε στα χέρια» 🎵",
+      text: [
+        "Μόλις δημιουργήσατε κάτι που δεν υπήρχε πριν.",
+        "",
+        "Δύο άνθρωποι.",
+        "Μία επαφή.",
+        "Ένα μοναδικό μουσικό αποτέλεσμα.",
+        "",
+        "Αυτή είναι η μουσική που δημιουργήθηκε τη στιγμή που πιαστήκατε στα χέρια.",
+        "",
+        "Άκουσέ την ξανά εδώ:",
+        opts.audioUrl,
+        "(και στο συνημμένο αρχείο)",
+        "",
+        "ΠΙΑΣΤΕΙΤΕ ΣΤΑ ΧΕΡΙΑ by Athens Voice",
+        "",
+        "Concept by Επιστήμη Μπινάζη",
+        "Developed by Δήμος Γκοντόλιας",
+        "in collaboration with EduCoach",
+      ].join("\n"),
+      html: [
+        "<p>Μόλις δημιουργήσατε κάτι που δεν υπήρχε πριν.</p>",
+        "<p>Δύο άνθρωποι.<br>Μία επαφή.<br>Ένα μοναδικό μουσικό αποτέλεσμα.</p>",
+        "<p>Αυτή είναι η μουσική που δημιουργήθηκε τη στιγμή που πιαστήκατε στα χέρια.</p>",
+        `<p><strong>Άκουσέ την ξανά εδώ:</strong><br><a href="${escape(opts.audioUrl)}">${escape(opts.title)}.mp3</a> (και στο συνημμένο αρχείο)</p>`,
+        "<p><strong>ΠΙΑΣΤΕΙΤΕ ΣΤΑ ΧΕΡΙΑ by Athens Voice</strong></p>",
+        "<p>Concept by <strong>Επιστήμη Μπινάζη</strong><br>Developed by <strong>Δήμος Γκοντόλιας</strong><br>in collaboration with <strong>EduCoach</strong></p>",
+      ].join(""),
       attachments: [{ filename: `${opts.title}.mp3`, content: audio, contentType: "audio/mpeg" }],
     });
     if (result.accepted.length === 0 || result.rejected.length > 0) {
