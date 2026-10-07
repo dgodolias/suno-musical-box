@@ -14,7 +14,6 @@ const FIELD = STEPS / COARSE;
 const ROWS = 12; // ridges per wave: the live one in front, earlier moments behind it
 const ROW_S = 0.3; // seconds between one ridge and the next one back
 const PAST_MS = ((ROWS - 1) * ROW_S + 0.5) * 1000; // how much of each wave's past to keep
-const SIGN_ROW = 3; // the BPM figure stands behind this many ridges
 const EDGE = 0.1; // share of the width tapered at each end
 const AMP = 0.25; // tallest bell of the front ridge, as a share of the height
 const DEPTH = 0.16; // how far behind the front ridge the last one sits, as a share of the height
@@ -163,34 +162,13 @@ void main() {
   float cover = (v_rim.y < 0.0 ? rim * rim : clamp(rim * v_rim.y, 0.0, 1.0)) * abs(v_ink.a);
   gl_FragColor = vec4(v_ink.rgb * cover, v_ink.a < 0.0 ? 0.0 : cover);
 }`;
-// The BPM figures: glowing text painted on a 2D canvas, drawn as light, or as
-// paint in light mode
-const SIGN_VERTEX = `
-attribute vec2 a_at;
-attribute vec2 a_uv;
-uniform vec2 u_size;
-varying vec2 v_uv;
-void main() {
-  v_uv = a_uv;
-  gl_Position = vec4(a_at / u_size * vec2(2.0, -2.0) + vec2(-1.0, 1.0), 0.0, 1.0);
-}`;
-const SIGN_FRAGMENT = `
-precision mediump float;
-uniform sampler2D u_figure;
-uniform vec4 u_tint;
-uniform float u_paint;
-varying vec2 v_uv;
-void main() {
-  float cover = texture2D(u_figure, v_uv).a * u_tint.a;
-  gl_FragColor = vec4(u_tint.rgb * cover, u_paint * cover);
-}`;
 const FLOATS = 8;
 // Per wave: a flank and a line per ridge, then four strokes on the front one;
 // after both, two glows between them, two strokes on the axis, its flash and
 // the sparks
 const STRIP_VERTICES = (2 * (2 * ROWS + 4) + 5) * ((STEPS + 1) * 2 + 2) + SPARKS * 6;
-const SIGN_W = 512;
-const SIGN_H = 256;
+// Over a picture (`glow`) the flanks only veil it, so it shows through them
+const GLOW_FLANK = 0.12;
 
 function link(gl: WebGLRenderingContext, vertex: string, fragment: string) {
   const program = gl.createProgram();
@@ -221,23 +199,18 @@ interface Wave {
   sheen: number; // where the light running along the front ridge is, in screens
   beat: number; // heartbeats since the page opened, for the notes
   due: number; // sparks owed
-  shown: number | null; // the figure painted on its sign
-  flash: number; // lights the sign up when the figure changes
   color: Hsl;
   lineX: Float32Array; // where the front ridge runs
   line: Float32Array;
   base: Float32Array; // the line it rests on
   bell: Float32Array; // how far along its swing each point is
-  sign: CanvasRenderingContext2D | null;
-  figure: WebGLTexture | null;
 }
 
 // One wave per heart on either side of a shared axis, red above for Person 1
 // and blue below for Person 2, each a range of ridges: the live one in front
 // and, behind it, the same wave a moment earlier each, smaller and dimmer with
 // distance. A ridge has a solid flank lit from the left, so the range reads as
-// a landscape; the ridges trail the way the wave is travelling, and the BPM
-// stands among them as a figure of light.
+// a landscape; the ridges trail the way the wave is travelling.
 // Both always travel right: a faster heart packs more, steeper and taller bells
 // and travels faster than the slower one; as the rates converge the ranges
 // close in on the axis, turn pink and fall into step, until one is the mirror
@@ -248,12 +221,18 @@ interface Wave {
 // When the song is ready (`songRef`) the two lines gather up into its note,
 // and go back to their waves when a new session begins.
 // It follows the page's colour mode: light paints the ridges in ink on the
-// page, dark and cosmic draw them in light.
+// page, dark and cosmic draw them in light. With `glow` it is drawn in light
+// whatever the mode, its flanks only veiling what lies beneath, for a picture
+// under it.
 export default function Waveform({
-  ratesRef, songRef,
-}: { ratesRef: RefObject<LiveHeartRates>; songRef: RefObject<boolean> }) {
+  ratesRef, songRef, glow = false,
+}: { ratesRef: RefObject<LiveHeartRates>; songRef: RefObject<boolean>; glow?: boolean }) {
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const glowRef = useRef(glow);
+  useEffect(() => {
+    glowRef.current = glow;
+  }, [glow]);
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -264,10 +243,8 @@ export default function Waveform({
     const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
     const strips = link(gl, STRIP_VERTEX, STRIP_FRAGMENT);
-    const signs = link(gl, SIGN_VERTEX, SIGN_FRAGMENT);
-    if (!strips || !signs) return;
+    if (!strips) return;
     const stripBuffer = gl.createBuffer();
-    const signBuffer = gl.createBuffer();
     // Returns a switch to the given program, with its attributes on its buffer
     const switchTo = (program: WebGLProgram, buffer: WebGLBuffer, layout: [string, number][]) => {
       const stride = layout.reduce((sum, [, size]) => sum + size, 0) * 4;
@@ -287,14 +264,10 @@ export default function Waveform({
       };
     };
     const toStrips = switchTo(strips, stripBuffer, [["a_at", 2], ["a_rim", 2], ["a_ink", 4]]);
-    const toSigns = switchTo(signs, signBuffer, [["a_at", 2], ["a_uv", 2]]);
-    const uTint = gl.getUniformLocation(signs, "u_tint");
-    const uPaint = gl.getUniformLocation(signs, "u_paint");
     // Colours come out premultiplied: paint covers, light (no opacity) adds
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     gl.clearColor(0, 0, 0, 0);
-    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
 
     const resize = () => {
       const dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -307,54 +280,10 @@ export default function Waveform({
     resize();
 
     const row = () => new Float32Array(STEPS + 1);
-    const waves: Wave[] = PEOPLE.map(() => {
-      const sign = document.createElement("canvas");
-      sign.width = SIGN_W;
-      sign.height = SIGN_H;
-      const figure = gl.createTexture();
-      gl.bindTexture(gl.TEXTURE_2D, figure);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, sign);
-      return {
-        bpm: REST_BPM, quick: REST_BPM, calm: REST_BPM, level: 0, amp: REST_AMP, speed: CRUISE, bells: REST_BPM / BPM_PER_BELL, offset: 0, pastAt: [], pastOffset: [], pastBells: [], sheen: 0,
-        beat: 0, due: 0, shown: null, flash: 0, color: VIOLET, lineX: row(), line: row(), base: row(), bell: row(),
-        sign: sign.getContext("2d"), figure,
-      };
-    });
-    // The page's display font, once it has loaded
-    let family = "sans-serif";
-    const paintSign = (w: Wave) => {
-      const ctx = w.sign;
-      if (!ctx) return;
-      ctx.clearRect(0, 0, SIGN_W, SIGN_H);
-      if (w.shown !== null) {
-        ctx.font = `700 ${SIGN_H * 0.74}px ${family}`;
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillStyle = "#fff";
-        ctx.shadowColor = "#fff";
-        // A wide glow, then the figure itself
-        ctx.shadowBlur = SIGN_H * 0.12;
-        ctx.globalAlpha = 0.55;
-        ctx.fillText(String(w.shown), SIGN_W / 2, SIGN_H * 0.54);
-        ctx.shadowBlur = 0;
-        ctx.globalAlpha = 1;
-        ctx.fillText(String(w.shown), SIGN_W / 2, SIGN_H * 0.54);
-      }
-      gl.bindTexture(gl.TEXTURE_2D, w.figure);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, ctx.canvas);
-    };
-    let live = true;
-    const display = getComputedStyle(document.documentElement).getPropertyValue("--font-display").trim();
-    if (display) {
-      document.fonts.load(`700 64px ${display}`).then(() => {
-        if (!live) return;
-        family = `${display}, sans-serif`;
-        waves.forEach(paintSign);
-      }, () => {});
-    }
+    const waves: Wave[] = PEOPLE.map(() => ({
+      bpm: REST_BPM, quick: REST_BPM, calm: REST_BPM, level: 0, amp: REST_AMP, speed: CRUISE, bells: REST_BPM / BPM_PER_BELL, offset: 0, pastAt: [], pastOffset: [], pastBells: [], sheen: 0,
+      beat: 0, due: 0, color: VIOLET, lineX: row(), line: row(), base: row(), bell: row(),
+    }));
 
     const frontX = row();
     const farX = row();
@@ -365,7 +294,6 @@ export default function Waveform({
     const wide = new Float32Array(FIELD + 1);
     const rough = new Float32Array(FIELD + 1);
     const vertices = new Float32Array(STRIP_VERTICES * FLOATS);
-    const quad = new Float32Array(16);
     const spark = {
       x: new Float32Array(SPARKS), y: new Float32Array(SPARKS), vx: new Float32Array(SPARKS),
       vy: new Float32Array(SPARKS), age: new Float32Array(SPARKS).fill(1), life: new Float32Array(SPARKS).fill(1),
@@ -375,6 +303,7 @@ export default function Waveform({
     let filled = 0;
     let ink: Rgb = [0, 0, 0];
     let paper = false; // light mode: everything is paint instead of light
+    let veil = 1; // how much the flanks cover what is beneath
     let night = BACKDROPS.midnight;
     let sync = 0; // 0 = apart, 1 = the two hearts agree
     let harmony = 0; // builds up while they stay in sync
@@ -449,9 +378,9 @@ export default function Waveform({
         const deep = paper ? 0.97 : 0.8;
         vertex(
           xs[j], ys[j], 0, 1, lerp(night[0], tint[0], amount), lerp(night[1], tint[1], amount),
-          lerp(night[2], tint[2], amount), 0.95 * FADE[j] * cover
+          lerp(night[2], tint[2], amount), 0.95 * FADE[j] * cover * veil
         );
-        vertex(xs[j], foot, 0, 1, night[0] * deep, night[1] * deep, night[2] * deep, 0.95 * FADE[j] * cover);
+        vertex(xs[j], foot, 0, 1, night[0] * deep, night[1] * deep, night[2] * deep, 0.95 * FADE[j] * cover * veil);
       }
     };
 
@@ -539,8 +468,9 @@ export default function Waveform({
       // The colour mode the page is in (next-themes puts it on <html>)
       const modes = document.documentElement.classList;
       const mode = modes.contains("midnight") ? "midnight" : modes.contains("dark") ? "dark" : "light";
-      paper = mode === "light";
-      night = BACKDROPS[mode];
+      paper = !glowRef.current && mode === "light";
+      night = glowRef.current ? BACKDROPS.midnight : BACKDROPS[mode];
+      veil = glowRef.current ? GLOW_FLANK : 1;
       // A reading counts until it is as old as the ring card's stale limit
       const wall = Date.now();
       const bpm = ratesRef.current.map((s) => (s && wall - s.at < HR_STALE_MS ? s.bpm : null));
@@ -596,13 +526,6 @@ export default function Waveform({
         w.speed += (Math.min(heading, TOP_SPEED) - w.speed) * ease(1.5);
         // The note is pink whatever the two hearts read, with a trace of each
         w.color = mix(mix(PEOPLE[p].rest, PEOPLE[p].color, w.level), PINK, Math.max(sync, 0.8 * morph));
-        // The sign keeps its last figure while it fades out with the wave
-        if (b !== null && b !== w.shown) {
-          w.shown = b;
-          w.flash = 1;
-          paintSign(w);
-        }
-        w.flash *= Math.exp(-dt / 0.5);
         if (still) return;
         // Bells travel right. When they get denser they close up towards the
         // right edge, and when sparser they spread out from the left one, so
@@ -741,15 +664,12 @@ export default function Waveform({
       };
 
       filled = 0;
-      const cuts: number[] = [];
       // The note is drawn far bolder than a ridge
       const bold = lerp(1, 12, morph);
       waves.forEach((w, p) => {
         const { side } = PEOPLE[p];
         const tint = rgb(w.color, paper ? -12 : 0);
         for (let k = ROWS - 1; k >= 0; k--) {
-          // The sign goes in here, in front of the ridges already drawn
-          if (k === SIGN_ROW - 1) cuts.push(filled / FLOATS);
           const front = k === 0;
           const xs = front ? w.lineX : farX;
           const ys = front ? w.line : farY;
@@ -781,7 +701,6 @@ export default function Waveform({
           ink = rgb(w.color, paper ? 6 : 22);
           stroke(xs, ys, 1, 1.2 * unit * bold, paper ? 0.55 : 0.8, false, shine);
         }
-        cuts.push(filled / FLOATS);
       });
 
       // Wherever a bell of one wave faces a bell of the other, the space
@@ -835,55 +754,19 @@ export default function Waveform({
         vertex(tx + nx, ty + ny, 1, -1, r, g, b, 0);
       }
 
-      // Each wave's BPM as a figure of light standing among its ridges: the
-      // nearest ones pass in front of it, and it shows through them dimmed,
-      // as if half sunk into the wave
-      const drawSign = (p: number, opacity: number) => {
-        const w = waves[p];
-        const height = 0.2 * H * (1 + 0.06 * w.flash);
-        const middle = cy + PEOPLE[p].side * (apart + 0.135 + 0.006 * Math.sin(0.6 * t + p)) * H;
-        quad.set([
-          W / 2 - height, middle - height / 2, 0, 0, W / 2 + height, middle - height / 2, 1, 0,
-          W / 2 - height, middle + height / 2, 0, 1, W / 2 + height, middle + height / 2, 1, 1,
-        ]);
-        gl.bufferData(gl.ARRAY_BUFFER, quad, gl.DYNAMIC_DRAW);
-        gl.bindTexture(gl.TEXTURE_2D, w.figure);
-        const [r, g, b] = rgb(w.color, paper ? -16 : 8);
-        gl.uniform4f(uTint, r, g, b, opacity * w.level * fold * (0.8 + 0.4 * w.flash));
-        gl.uniform1f(uPaint, paper ? 1 : 0);
-        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-      };
       gl.clear(gl.COLOR_BUFFER_BIT);
-      gl.bindBuffer(gl.ARRAY_BUFFER, stripBuffer);
+      toStrips();
       gl.bufferData(gl.ARRAY_BUFFER, vertices.subarray(0, filled), gl.DYNAMIC_DRAW);
-      let drawn = 0;
-      const drawStripsTo = (end: number) => {
-        toStrips();
-        gl.drawArrays(gl.TRIANGLE_STRIP, drawn, end - drawn);
-        drawn = end;
-      };
-      waves.forEach((_, p) => {
-        drawStripsTo(cuts[2 * p]);
-        toSigns();
-        drawSign(p, 0.9);
-        drawStripsTo(cuts[2 * p + 1]);
-      });
-      drawStripsTo(filled / FLOATS);
-      toSigns();
-      waves.forEach((_, p) => drawSign(p, 0.38));
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, filled / FLOATS);
 
       raf = requestAnimationFrame(frame);
     };
     raf = requestAnimationFrame(frame);
     return () => {
-      live = false;
       cancelAnimationFrame(raf);
       observer.disconnect();
-      waves.forEach((w) => gl.deleteTexture(w.figure));
       gl.deleteBuffer(stripBuffer);
-      gl.deleteBuffer(signBuffer);
       gl.deleteProgram(strips);
-      gl.deleteProgram(signs);
     };
   }, [ratesRef, songRef]);
 

@@ -5,6 +5,7 @@ import ThemeToggle from "@/components/theme-toggle";
 import WaitingMusic from "@/components/waiting-music";
 import { DEFAULT_VOLUME } from "@/lib/waiting-music";
 import Waveform from "@/components/waveform";
+import { Photo, SONG_LAYOUT, TIDE_LAYOUTS, VIEWS, ViewPicker, WavesFrame, useView } from "@/components/syncwave-views";
 import type { Replay } from "@/lib/db";
 import {
   HEART_RATE_CHANNEL,
@@ -43,6 +44,8 @@ function startReplay(replay: Replay, ratesRef: RefObject<LiveHeartRates>) {
 // How long into a replay the song arrives, with ?song, a little later than
 // its bar expects
 const REPLAY_SONG_MS = 15000;
+// Tide: how long the picture, then the waves, hold the front
+const TIDE_MS = 20000;
 
 // The wait for the song, filling from one edge of the screen to the other
 // under the waves: no figure, just how far along it is. Once the song comes
@@ -55,7 +58,7 @@ function WaitBar({ plan, done }: { plan: SessionPlan; done: boolean }) {
   }, [plan]);
   return (
     <div
-      className={`absolute inset-x-0 bottom-[11vh] h-[0.5vh] min-h-[3px] bg-primary/15 ${
+      className={`absolute inset-x-0 bottom-[1.5vh] z-10 h-[0.5vh] min-h-[3px] bg-primary/15 ${
         done ? "animate-out fade-out fill-mode-forwards delay-700 duration-1000" : "animate-in fade-in duration-700"
       }`}
     >
@@ -85,6 +88,9 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
   const [musicBlocked, setMusicBlocked] = useState(false);
   const [unlinked, setUnlinked] = useState(false);
   const [awake, setAwake] = useState(false);
+  // The picture is always on screen; the view decides where, and where the waves go
+  const view = useView();
+  const [tideTurn, setTideTurn] = useState(0);
 
   // The colour mode switch shows while the mouse moves, then gets out of the way
   useEffect(() => {
@@ -146,30 +152,44 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
     };
   }, [replay, song]);
 
+  useEffect(() => {
+    if (view !== 5) return;
+    const timer = setInterval(() => setTideTurn((turn) => 1 - turn), TIDE_MS);
+    return () => clearInterval(timer);
+  }, [view]);
+  const layout = ready ? SONG_LAYOUT : view === 5 ? TIDE_LAYOUTS[tideTurn] : VIEWS[view - 1].layout;
+
   const toggleFullscreen = () => {
     if (document.fullscreenElement) void document.exitFullscreen();
     else document.documentElement.requestFullscreen().catch(() => {});
   };
 
-  const note = "absolute text-[clamp(13px,1.1vw,22px)] text-muted-foreground animate-in fade-in duration-700";
+  const note = "absolute z-10 text-[clamp(13px,1.1vw,22px)] text-muted-foreground animate-in fade-in duration-700";
+  // Hints stay readable over the picture
+  const pill = { background: "hsl(var(--background) / 0.72)", borderRadius: 9999, padding: "0.35em 1em" };
   return (
     <main
       onDoubleClick={toggleFullscreen}
       className="fixed inset-0 overflow-hidden select-none"
       style={{ background: BACKDROP }}
     >
-      <Waveform ratesRef={ratesRef} songRef={songRef} />
+      <Photo layout={layout} />
+      <WavesFrame layout={layout}>
+        <Waveform ratesRef={ratesRef} songRef={songRef} glow={layout.waves.glow} />
+      </WavesFrame>
       {/* The waiting music plays here, fading out as the song starts on the
           Musical Box page */}
       <WaitingMusic playing={!ready} volume={musicVolume} round={round} onBlocked={setMusicBlocked} />
       {musicBlocked && !ready && (
-        <p className={`${note} inset-x-0 top-[3vh] px-4 text-center`}>Click anywhere to turn on the music</p>
+        <p className={`${note} inset-x-0 top-[3vh] px-4 text-center`}>
+          <span style={pill}>Click anywhere to turn on the music</span>
+        </p>
       )}
       {plan && <WaitBar plan={plan} done={ready} />}
       {ready && (
         <div
           key="ready"
-          className="absolute inset-x-0 top-[73vh] px-4 text-center animate-in fade-in slide-in-from-bottom-6 fill-mode-both delay-[2400ms] duration-1000 ease-out"
+          className="absolute inset-x-0 top-[81vh] z-10 px-4 text-center animate-in fade-in slide-in-from-bottom-6 fill-mode-both delay-[2400ms] duration-1000 ease-out"
         >
           <p
             className="font-display text-[clamp(30px,4.4vw,88px)] leading-tight font-bold tracking-tight text-transparent"
@@ -189,20 +209,21 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
       )}
       <div
         onDoubleClick={(event) => event.stopPropagation()}
-        className={`absolute top-[3vh] right-[3vw] transition-opacity duration-500 ${
+        className={`absolute top-[3vh] right-[3vw] z-10 transition-opacity duration-500 ${
           awake ? "opacity-100" : "pointer-events-none opacity-0"
         }`}
       >
         <ThemeToggle />
       </div>
+      <ViewPicker view={view} visible={awake} />
       {unlinked && (
         <p className={`${note} inset-x-0 bottom-[3vh] px-4 text-center`}>
-          Open the Musical Box in another tab of this browser to stream the rings.
+          <span style={pill}>Open the Musical Box in another tab of this browser to stream the rings.</span>
         </p>
       )}
       {replay !== undefined && (
-        <p className={`${note} right-[3vw] bottom-[3vh] opacity-60`}>
-          {replay ? `Replay of recorded session #${replay.sessionId}` : "No recorded session to replay"}
+        <p className={`${note} right-[3vw] bottom-[3vh] opacity-70`}>
+          <span style={pill}>{replay ? `Replay of recorded session #${replay.sessionId}` : "No recorded session to replay"}</span>
         </p>
       )}
     </main>
