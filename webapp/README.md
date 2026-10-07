@@ -1,5 +1,33 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Song email (Zoho)
+
+`POST /api/send-song` looks up the finished song by `taskId`, downloads that MP3,
+and sends it through Zoho SMTP as an attachment. The sender name and email
+signature are Athens Voice. It uses the authenticated mailbox as the From
+address; client-supplied audio URLs are ignored.
+
+Configure these variables in `.env.local` and Vercel Production/Preview:
+
+| Variable | Value |
+| --- | --- |
+| `SMTP_USER` | `piastitestaxeria@athensvoice.gr` |
+| `SMTP_PASS` | Zoho application password; store as a Vercel Secret |
+| `SMTP_HOST` | `smtp.zoho.eu` (also the default) |
+
+The provider uses port 465 with TLS and bounded connection/download timeouts.
+This mailbox authenticated against `smtp.zoho.eu`; `smtppro.zoho.eu` rejected
+it. If the Zoho account configuration changes, use the server shown in
+[Zoho Mail's SMTP settings](https://www.zoho.com/mail/help/zoho-smtp.html).
+The application name assigned when generating the password is a label in Zoho,
+and is not an SMTP setting. `BREVO_API_KEY` is no longer used.
+
+After changing Vercel variables, redeploy. Never commit application passwords.
+Run `npm test`, `npx tsc --noEmit`, `npm run lint`, and `npm run build` before
+deployment. For a delivery smoke test, submit a real finished song's `taskId`
+and an inbox you control to `/api/send-song`; check the actual received MP3,
+since `{ "ok": true }` confirms SMTP acceptance rather than inbox placement.
+
 ## Getting Started
 
 First, run the development server:

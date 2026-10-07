@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import { getSongAudioUrl } from "@/lib/db";
 import { EMAIL_RE, sendSongEmail } from "@/lib/email";
 
+export const runtime = "nodejs";
+export const maxDuration = 60;
+
 export async function POST(request: Request) {
   const { taskId, email } = await request.json();
 
