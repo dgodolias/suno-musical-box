@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState, type RefObject } from "react";
 import ThemeToggle from "@/components/theme-toggle";
-import Credit from "@/components/credit";
 import WaitingMusic from "@/components/waiting-music";
 import { DEFAULT_VOLUME } from "@/lib/waiting-music";
 import Waveform from "@/components/waveform";
@@ -167,9 +166,6 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
         <p className={`${note} inset-x-0 top-[3vh] px-4 text-center`}>Click anywhere to turn on the music</p>
       )}
       {plan && <WaitBar plan={plan} done={ready} />}
-      <div className="absolute inset-x-0 bottom-[6vh] flex justify-center px-4 text-[clamp(12px,1vw,20px)]">
-        <Credit />
-      </div>
       {ready && (
         <div
           key="ready"

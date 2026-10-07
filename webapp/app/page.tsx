@@ -8,7 +8,6 @@ import MusicPlayer from "@/components/music-player";
 import Image from "next/image";
 import FloatingIcons from "@/components/floating-icons";
 import ThemeToggle from "@/components/theme-toggle";
-import Credit from "@/components/credit";
 import { Tv } from "lucide-react";
 import type { RingConnection, RingData } from "@/lib/ble/ring-manager";
 import { HEART_RATE_CHANNEL } from "@/lib/heart-rate-channel";
@@ -525,15 +524,12 @@ export default function Home() {
       <div className="relative mx-auto max-w-2xl px-4 py-10 space-y-8">
         {/* Brand bar */}
         <div className="flex items-center justify-between">
-          <div className="space-y-2">
-            <div className="flex items-center gap-2.5">
-              {/* Same as educoach-platform's <Logo showIcon />: logo-v3 + text wordmark */}
-              <Image src="/brand/logo.png" alt="" width={36} height={36} priority className="rounded-lg" />
-              <span className="font-display text-2xl font-bold tracking-tight">
-                Edu<span className="text-primary">Coach</span>
-              </span>
-            </div>
-            <Credit className="text-xs" />
+          <div className="flex items-center gap-2.5">
+            {/* Same as educoach-platform's <Logo showIcon />: logo-v3 + text wordmark */}
+            <Image src="/brand/logo.png" alt="" width={36} height={36} priority className="rounded-lg" />
+            <span className="font-display text-2xl font-bold tracking-tight">
+              Edu<span className="text-primary">Coach</span>
+            </span>
           </div>
           <div className="flex items-center gap-2">
             {/* Opens in a tab of its own (the same one each time); drag it out onto a TV */}
