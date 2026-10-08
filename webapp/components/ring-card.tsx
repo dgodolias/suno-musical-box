@@ -217,6 +217,8 @@ export default function RingCard({
     : null;
   const batteryAgeLabel = batteryAge === null ? "not read" : batteryAge < 60
     ? `${batteryAge}s ago` : `${Math.floor(batteryAge / 60)}m ago`;
+  // Off the finger, with the page retrying: the ring must stay connected meanwhile
+  const offFinger = !opticalActive && !measurementPaused && waitingForContact && !passiveObservation;
   // When the ring needs someone: off the finger, paused, or failing
   const attention = opticalActive ? null
     : measurementPaused
@@ -306,7 +308,10 @@ export default function RingCard({
         {/* Only what needs someone to act stays in view; the running status is
             under Measurement diagnostics */}
         {!mockMode && isConnected && attention && (
-          <p role="status" className={`-mt-2 text-xs ${waitingForContact && !passiveObservation ? "text-warning" : "text-muted-foreground"}`}>{attention}</p>
+          <div role="status" className={`-mt-2 text-xs ${waitingForContact && !passiveObservation ? "text-warning" : "text-muted-foreground"}`}>
+            <p>{attention}</p>
+            {offFinger && <p>Do not disconnect the ring.</p>}
+          </div>
         )}
 
         {/* Getting connected (retrying, not found, lost) is a warning; a problem
