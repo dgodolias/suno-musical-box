@@ -351,7 +351,8 @@ test("the music bar follows the measured Suno time and keeps creeping if it runs
   const page = pageHarness();
   page.generationResponses.push({ ok: true, json: async () => ({ taskId: "slow" }) });
   await page.start();
-  await page.advance(55000);
+  // No ring measures, so the request goes at 5 s
+  await page.advance(45000);
   // 40 s after the request: the expected time, slowed down smoothly
   assert.equal(page.player().generationProgress, 82);
   await page.advance(60000);
@@ -713,12 +714,12 @@ test("the display's waiting music hears its volume, and starts again with each N
   reloaded.unmount();
 });
 
-test("with one ring silent, the song is asked for at 15 s, without a two-person snapshot", async () => {
+test("with one ring silent, the song is asked for at 5 s, without a two-person snapshot", async () => {
   const page = pageHarness();
   page.generationResponses.push({ ok: true, json: async () => ({ taskId: "late" }) });
   await page.start();
   page.reading(1, 70);
-  await page.advance(14000);
+  await page.advance(4000);
   assert.equal(page.generations().length, 0);
   await page.advance(1000);
   assert.equal(page.generations().length, 1);

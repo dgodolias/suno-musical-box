@@ -24,9 +24,10 @@ import type { RecordedReading, RecordingSession } from "@/lib/recording-outbox";
 const WINDOW_SEC = 30;
 // The song is asked for as soon as both rings have given their first
 // measurement of the session (they go with the request), or this many seconds
-// in if one has not. The page keeps showing the recording until WINDOW_SEC, so
-// by the time the music bar appears, most of the wait has gone by
-const MUSIC_BY_SEC = 15;
+// in if one has not: a silent ring must not hold the song up. The page keeps
+// showing the recording until WINDOW_SEC, so by the time the music bar
+// appears, most of the wait has gone by
+const MUSIC_BY_SEC = 5;
 // How soon both rings usually measure after Start (they are already on)
 const FIRST_MEASUREMENT_SEC = 2;
 // A 3-minute V6 song was ready 37-40 s after the request in the 2026-10-06
