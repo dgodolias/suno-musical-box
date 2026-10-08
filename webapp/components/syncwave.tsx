@@ -1,11 +1,10 @@
 "use client";
 
+import Image from "next/image";
 import { useEffect, useRef, useState, type RefObject } from "react";
-import ThemeToggle from "@/components/theme-toggle";
 import WaitingMusic from "@/components/waiting-music";
 import { DEFAULT_VOLUME } from "@/lib/waiting-music";
 import Waveform from "@/components/waveform";
-import { Photo, VIEWS, ViewPicker, WavesFrame, useView, wavesMiddle } from "@/components/syncwave-views";
 import type { Replay } from "@/lib/db";
 import {
   HEART_RATE_CHANNEL,
@@ -16,7 +15,14 @@ import {
 } from "@/lib/heart-rate-channel";
 import { placebo } from "@/lib/progress";
 
-// The page's colour mode, with a faint glow along the waves
+// The Athens Voice key visual (16:9) fills the screen, a shade darker under
+// the waves drawn in light over it: a wider or taller screen loses a sliver
+// of its sides or of its top and bottom, never a gap
+const PHOTO = "/athens-voice.jpg";
+const PHOTO_ALT = "Athens Voice: Πιαστείτε στα χέρια, και ακούστε τη μουσική που δημιουργεί το συναίσθημά σας";
+const PHOTO_DIM = 0.78;
+
+// Behind the picture while it loads, with a faint glow along the waves
 const BACKDROP =
   "radial-gradient(60% 40% at 50% 50%, hsl(var(--syncwave-glow)), transparent 70%), " +
   "radial-gradient(130% 100% at 50% 50%, hsl(var(--syncwave-centre)), hsl(var(--syncwave-edge)) 75%)";
@@ -101,24 +107,6 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
   const [round, setRound] = useState(0);
   const [musicBlocked, setMusicBlocked] = useState(false);
   const [unlinked, setUnlinked] = useState(false);
-  const [awake, setAwake] = useState(false);
-  // The picture is always on screen; the view decides where, and where the waves go
-  const view = useView();
-
-  // The colour mode switch shows while the mouse moves, then gets out of the way
-  useEffect(() => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const wake = () => {
-      setAwake(true);
-      clearTimeout(timer);
-      timer = setTimeout(() => setAwake(false), 2500);
-    };
-    window.addEventListener("pointermove", wake);
-    return () => {
-      window.removeEventListener("pointermove", wake);
-      clearTimeout(timer);
-    };
-  }, []);
 
   useEffect(() => {
     // The waves become the song's note while it is ready, with its words below
@@ -156,6 +144,8 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
       }
       if (message.type !== "rates") return;
       ratesRef.current = message.rates;
+      // Until the song plays again the waves are the hearts' alone
+      if (!message.song) musicRef.current = null;
       // A new plan only when it changes, so the bar does not restart
       setPlan((current) =>
         current?.startedAt === message.plan?.startedAt && current?.expectedMs === message.plan?.expectedMs
@@ -174,9 +164,6 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
     };
   }, [replay, song]);
 
-  // The view stays as it is when the song comes: only a label goes over the waves
-  const layout = VIEWS[view - 1].layout;
-
   const toggleFullscreen = () => {
     if (document.fullscreenElement) void document.exitFullscreen();
     else document.documentElement.requestFullscreen().catch(() => {});
@@ -191,15 +178,16 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
       className="fixed inset-0 overflow-hidden select-none"
       style={{ background: BACKDROP }}
     >
-      <Photo layout={layout} />
-      <WavesFrame layout={layout}>
-        <Waveform ratesRef={ratesRef} songRef={songRef} musicRef={musicRef} glow={layout.waves.glow} />
-      </WavesFrame>
-      {layout.second && (
-        <WavesFrame layout={layout} second>
-          <Waveform ratesRef={ratesRef} songRef={songRef} musicRef={musicRef} glow={layout.waves.glow} />
-        </WavesFrame>
-      )}
+      <Image
+        src={PHOTO}
+        alt={PHOTO_ALT}
+        fill
+        sizes="100vw"
+        priority
+        className="object-cover"
+        style={{ filter: `brightness(${PHOTO_DIM})` }}
+      />
+      <Waveform ratesRef={ratesRef} songRef={songRef} musicRef={musicRef} glow />
       {/* The waiting music plays here, fading out as the song starts on the
           Musical Box page */}
       <WaitingMusic playing={!ready} volume={musicVolume} round={round} onBlocked={setMusicBlocked} />
@@ -209,12 +197,11 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
         </p>
       )}
       {plan && <WaitBar plan={plan} done={ready} />}
-      {/* Over the waves, which now move with the song, until New Session */}
+      {/* On the axis of the waves, which now move with the song, until New Session */}
       {ready && (
         <div
           key="ready"
-          className="absolute inset-x-0 z-10 flex -translate-y-1/2 justify-center px-4 animate-in fade-in zoom-in-95 duration-1000 ease-out"
-          style={{ top: `${wavesMiddle(layout)}%` }}
+          className="absolute inset-x-0 top-1/2 z-10 flex -translate-y-1/2 justify-center px-4 animate-in fade-in zoom-in-95 duration-1000 ease-out"
         >
           <p
             className="font-display text-[clamp(24px,3.4vw,68px)] leading-tight font-bold tracking-tight"
@@ -238,15 +225,6 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
           </p>
         </div>
       )}
-      <div
-        onDoubleClick={(event) => event.stopPropagation()}
-        className={`absolute top-[3vh] right-[3vw] z-10 transition-opacity duration-500 ${
-          awake ? "opacity-100" : "pointer-events-none opacity-0"
-        }`}
-      >
-        <ThemeToggle />
-      </div>
-      <ViewPicker view={view} visible={awake} />
       {unlinked && (
         <p className={`${note} inset-x-0 bottom-[3vh] px-4 text-center`}>
           <span style={pill}>Open the Musical Box in another tab of this browser to stream the rings.</span>

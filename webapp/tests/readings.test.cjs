@@ -669,7 +669,7 @@ test("the display's wait ends with Stop, or when no song is coming", async () =>
   page.unmount();
 });
 
-test("a song that cannot start playing still turns the display into its note, unless a new session began", async () => {
+test("a song whose sound is still loading tells the display it is ready after a while, unless a new session began", async () => {
   const page = pageHarness();
   page.generationResponses.push({ ok: true, json: async () => ({ taskId: "song" }) });
   page.pollResponses.push({ ok: true, json: async () => ({ status: "ready", audioUrl: "https://test.invalid/song.mp3" }) });
@@ -678,7 +678,7 @@ test("a song that cannot start playing still turns the display into its note, un
   await page.advance(31000);
   assert.equal(page.player().currentSong.taskId, "song");
   assert.equal(page.broadcasts.at(-1).song, false);
-  await page.advance(8000);
+  await page.advance(20000);
   assert.equal(page.broadcasts.at(-1).song, true);
   // A song shown just before New Session cannot turn the next session's display
   const again = pageHarness();
@@ -688,7 +688,7 @@ test("a song that cannot start playing still turns the display into its note, un
   for (let i = 0; i < 5; i++) { again.reading(1, 70); again.reading(2, 80); }
   await again.advance(31000);
   await again.next();
-  await again.advance(8000);
+  await again.advance(20000);
   assert.equal(again.broadcasts.at(-1).song, false);
   page.unmount();
   again.unmount();

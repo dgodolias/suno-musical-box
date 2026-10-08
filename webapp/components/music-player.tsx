@@ -54,18 +54,27 @@ export default function MusicPlayer({
     }
   }, [currentSong]);
 
-  // The song's loudness through it, worked out once from its file...
+  // The song's loudness through it, worked out once from its file: only once
+  // the song is playing, so the download does not hold up its start...
   useEffect(() => {
-    if (!currentSong) return;
+    const audio = audioRef.current;
+    if (!currentSong || !audio) return;
     levelsRef.current = null;
     const download = new AbortController();
-    analyseSong(currentSong.audioUrl, download.signal).then(
-      (levels) => {
-        levelsRef.current = levels;
-      },
-      () => {}
-    );
-    return () => download.abort();
+    const begin = () => {
+      audio.removeEventListener("playing", begin);
+      analyseSong(currentSong.audioUrl, download.signal).then(
+        (levels) => {
+          levelsRef.current = levels;
+        },
+        () => {}
+      );
+    };
+    audio.addEventListener("playing", begin);
+    return () => {
+      audio.removeEventListener("playing", begin);
+      download.abort();
+    };
   }, [currentSong]);
   // ...and, while it plays, the levels of the moment heard go to the SyncWave
   // display, whose waves move with them (a tab playing sound keeps its timers)

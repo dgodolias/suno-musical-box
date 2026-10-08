@@ -36,9 +36,10 @@ const SONG_EXPECTED_SEC = 40;
 // set again from the moment the song is asked for
 const PLAN_MS = Math.max(WINDOW_SEC, FIRST_MEASUREMENT_SEC + SONG_EXPECTED_SEC) * 1000;
 const POLL_MS = 3000;
-// The note forms on the SyncWave display when the song starts playing; this
-// long after the song is shown it forms anyway (sound blocked, slow network)
-const SONG_START_GRACE_MS = 8000;
+// The SyncWave display hears that the song plays as its sound starts (or at
+// once if the browser will not play it); if the sound is still loading this
+// long after the song is shown, it hears anyway
+const SONG_START_GRACE_MS = 20000;
 const POLL_ATTEMPTS = 100; // five minutes
 const CURRENT_SESSION_KEY = "musical-box-current-session";
 // Which New Session this tab is on, kept across its reloads: the SyncWave

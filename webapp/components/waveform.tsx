@@ -454,7 +454,6 @@ export default function Waveform({
       const ease = (tau: number) => 1 - Math.exp(-dt / tau);
       // Bells keep their shape in any frame: a wider one than the 16:9 screen
       // fits more of them, rather than stretching each
-      const fit = clamp(canvas.width / Math.max(1, canvas.height) / (16 / 9), 0.6, 4);
       // The colour mode the page is in (next-themes puts it on <html>)
       const modes = document.documentElement.classList;
       const mode = modes.contains("midnight") ? "midnight" : modes.contains("dark") ? "dark" : "light";
@@ -462,11 +461,11 @@ export default function Waveform({
       night = glowRef.current ? BACKDROPS.midnight : BACKDROPS[mode];
       veil = glowRef.current ? GLOW_FLANK : 1;
       const wall = Date.now();
-      // While the song plays its levels stand in for the hearts (silence once
-      // they stop coming)
+      // While the song plays its levels stand in for the hearts, from the
+      // moment they come (silence once they stop coming)
       const heard = musicRef?.current;
-      const music: [number, number] | null = songRef.current
-        ? heard && wall - heard.at < MUSIC_STALE_MS ? [heard.low, heard.high] : [0, 0]
+      const music: [number, number] | null = songRef.current && heard
+        ? wall - heard.at < MUSIC_STALE_MS ? [heard.low, heard.high] : [0, 0]
         : null;
       // A reading counts until it is as old as the ring card's stale limit
       const bpm = music ? [null, null]
@@ -549,7 +548,7 @@ export default function Waveform({
         // Bells travel right. When they get denser they close up towards the
         // right edge, and when sparser they spread out from the left one, so
         // none ever slides back to the left
-        const bells = (w.bpm / BPM_PER_BELL) * fit;
+        const bells = w.bpm / BPM_PER_BELL;
         w.offset += w.speed * bells * Math.min(dt, 0.25) * (1 + (p === 0 ? pull : -pull)) + Math.max(0, bells - w.bells);
         w.bells = bells;
         w.pastAt.push(now);
