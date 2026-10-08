@@ -15,6 +15,13 @@ export interface SessionPlan {
   expectedMs: number;
 }
 
+// The song's loudness (0-1) in its bass and in its melody, as heard
+export interface MusicLevels {
+  low: number;
+  high: number;
+  at: number; // when the display received it, ms since the epoch
+}
+
 export type HeartRateMessage =
   // `plan` while a song is on its way; `song` once it plays, until a new
   // session begins; `musicVolume` (0-1) for the waiting music the display
@@ -27,6 +34,8 @@ export type HeartRateMessage =
       musicVolume: number;
       round: number;
     }
+  // While the song plays on the Musical Box page, about 30 times a second
+  | { type: "music"; low: number; high: number }
   | { type: "hello" }; // a display that just opened asks for the current rates
 
 export const HEART_RATE_CHANNEL = "musical-box:heart-rates";

@@ -63,12 +63,6 @@ const FRAME: Layout = {
   waves: { top: 0, bottom: 64, side: 0, glow: false, fade: false },
   second: { top: 64, bottom: 0 },
 };
-// Whatever the view, the song's note gets the stage, under the picture
-export const SONG_LAYOUT: Layout = {
-  photo: { top: 4, height: 34, card: true, dim: 1, fade: false, soft: false, above: true },
-  ambient: 0,
-  waves: { top: 30, bottom: 0, side: 0, glow: false, fade: false },
-};
 
 export const VIEWS = [
   { name: "Stack", hint: "The picture above, the waves below", layout: STACK },
@@ -197,6 +191,13 @@ export function Photo({ layout }: { layout: Layout }) {
       </div>
     </>
   );
+}
+
+/** Where the waves' axis is, in % of the screen: in Frame, the red half's middle. */
+export function wavesMiddle(layout: Layout): number {
+  const { top, bottom } = layout.waves;
+  const middle = (top + 100 - bottom) / 2;
+  return layout.second ? (top + middle) / 2 : middle;
 }
 
 /** Where the waves are drawn; they resize as the view changes. */

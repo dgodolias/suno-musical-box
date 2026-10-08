@@ -5,6 +5,10 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import SendSongForm from "@/components/send-song-form";
 import { DEFAULT_VOLUME, readVolume, saveVolume, subscribeVolume } from "@/lib/waiting-music";
+import { HEART_RATE_CHANNEL, type HeartRateMessage } from "@/lib/heart-rate-channel";
+import { analyseSong, levelsAt, type SongLevels } from "@/lib/song-levels";
+
+const LEVELS_MS = 33; // how often the playing song's levels go to the display
 
 interface Song {
   taskId: string;
@@ -39,6 +43,7 @@ export default function MusicPlayer({
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const levelsRef = useRef<SongLevels | null>(null);
   const waitingVolume = useSyncExternalStore(subscribeVolume, readVolume, () => DEFAULT_VOLUME);
 
   useEffect(() => {
@@ -47,6 +52,36 @@ export default function MusicPlayer({
       // Blocked sound still lets the display move on
       audioRef.current.play().catch(() => onStartedRef.current?.());
     }
+  }, [currentSong]);
+
+  // The song's loudness through it, worked out once from its file...
+  useEffect(() => {
+    if (!currentSong) return;
+    levelsRef.current = null;
+    const download = new AbortController();
+    analyseSong(currentSong.audioUrl, download.signal).then(
+      (levels) => {
+        levelsRef.current = levels;
+      },
+      () => {}
+    );
+    return () => download.abort();
+  }, [currentSong]);
+  // ...and, while it plays, the levels of the moment heard go to the SyncWave
+  // display, whose waves move with them (a tab playing sound keeps its timers)
+  useEffect(() => {
+    if (!currentSong) return;
+    const channel = new BroadcastChannel(HEART_RATE_CHANNEL);
+    const timer = setInterval(() => {
+      const audio = audioRef.current;
+      const levels = levelsRef.current;
+      if (!audio || !levels || audio.paused) return;
+      channel.postMessage({ type: "music", ...levelsAt(levels, audio.currentTime) } satisfies HeartRateMessage);
+    }, LEVELS_MS);
+    return () => {
+      clearInterval(timer);
+      channel.close();
+    };
   }, [currentSong]);
 
   const formatTime = (s: number) => {

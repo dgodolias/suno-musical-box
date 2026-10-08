@@ -5,12 +5,13 @@ import ThemeToggle from "@/components/theme-toggle";
 import WaitingMusic from "@/components/waiting-music";
 import { DEFAULT_VOLUME } from "@/lib/waiting-music";
 import Waveform from "@/components/waveform";
-import { Photo, SONG_LAYOUT, VIEWS, ViewPicker, WavesFrame, useView } from "@/components/syncwave-views";
+import { Photo, VIEWS, ViewPicker, WavesFrame, useView, wavesMiddle } from "@/components/syncwave-views";
 import type { Replay } from "@/lib/db";
 import {
   HEART_RATE_CHANNEL,
   type HeartRateMessage,
   type LiveHeartRates,
+  type MusicLevels,
   type SessionPlan,
 } from "@/lib/heart-rate-channel";
 import { placebo } from "@/lib/progress";
@@ -45,6 +46,19 @@ function startReplay(replay: Replay, ratesRef: RefObject<LiveHeartRates>) {
 // its bar expects
 const REPLAY_SONG_MS = 15000;
 
+// A replay has no song playing: a stand-in for its sound, a kick twice a
+// second over a slowly swelling melody, so the waves can be seen dancing
+function startReplayMusic(musicRef: RefObject<MusicLevels | null>) {
+  const begun = Date.now();
+  const timer = setInterval(() => {
+    const t = (Date.now() - begun) / 1000;
+    const kick = Math.exp(-6 * ((t * 2) % 1));
+    const melody = 0.45 + 0.25 * Math.sin(1.3 * t) + 0.15 * Math.sin(3.7 * t);
+    musicRef.current = { low: 0.2 + 0.75 * kick, high: Math.min(1, Math.max(0, melody)), at: Date.now() };
+  }, 33);
+  return () => clearInterval(timer);
+}
+
 // The wait for the song, filling from one edge of the screen to the other
 // under the waves: no figure, just how far along it is. Once the song comes
 // it fills up and goes
@@ -78,6 +92,8 @@ function WaitBar({ plan, done }: { plan: SessionPlan; done: boolean }) {
 export default function SyncWave({ replay, song = false }: { replay?: Replay | null; song?: boolean }) {
   const ratesRef = useRef<LiveHeartRates>([null, null]);
   const songRef = useRef(false);
+  // The song's sound while it plays, which then moves the waves
+  const musicRef = useRef<MusicLevels | null>(null);
   const [ready, setReady] = useState(false);
   const [plan, setPlan] = useState<SessionPlan | null>(null);
   // The waiting music, set from the Musical Box page
@@ -117,9 +133,14 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
       // The bar expects the song a little before it comes
       const begun = Date.now();
       const bar = setTimeout(() => setPlan({ startedAt: begun, expectedMs: 0.8 * REPLAY_SONG_MS }));
-      const timer = setTimeout(() => arrive(true), REPLAY_SONG_MS);
+      let stopMusic = () => {};
+      const timer = setTimeout(() => {
+        arrive(true);
+        stopMusic = startReplayMusic(musicRef);
+      }, REPLAY_SONG_MS);
       return () => {
         stop();
+        stopMusic();
         clearTimeout(bar);
         clearTimeout(timer);
       };
@@ -129,6 +150,10 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
     const hint = setTimeout(() => setUnlinked(true), 1500);
     channel.onmessage = (event: MessageEvent<HeartRateMessage>) => {
       const message = event.data;
+      if (message.type === "music") {
+        musicRef.current = { low: message.low, high: message.high, at: Date.now() };
+        return;
+      }
       if (message.type !== "rates") return;
       ratesRef.current = message.rates;
       // A new plan only when it changes, so the bar does not restart
@@ -149,7 +174,8 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
     };
   }, [replay, song]);
 
-  const layout = ready ? SONG_LAYOUT : VIEWS[view - 1].layout;
+  // The view stays as it is when the song comes: only a label goes over the waves
+  const layout = VIEWS[view - 1].layout;
 
   const toggleFullscreen = () => {
     if (document.fullscreenElement) void document.exitFullscreen();
@@ -167,11 +193,11 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
     >
       <Photo layout={layout} />
       <WavesFrame layout={layout}>
-        <Waveform ratesRef={ratesRef} songRef={songRef} glow={layout.waves.glow} />
+        <Waveform ratesRef={ratesRef} songRef={songRef} musicRef={musicRef} glow={layout.waves.glow} />
       </WavesFrame>
       {layout.second && (
         <WavesFrame layout={layout} second>
-          <Waveform ratesRef={ratesRef} songRef={songRef} glow={layout.waves.glow} />
+          <Waveform ratesRef={ratesRef} songRef={songRef} musicRef={musicRef} glow={layout.waves.glow} />
         </WavesFrame>
       )}
       {/* The waiting music plays here, fading out as the song starts on the
@@ -183,24 +209,32 @@ export default function SyncWave({ replay, song = false }: { replay?: Replay | n
         </p>
       )}
       {plan && <WaitBar plan={plan} done={ready} />}
+      {/* Over the waves, which now move with the song, until New Session */}
       {ready && (
         <div
           key="ready"
-          className="absolute inset-x-0 top-[81vh] z-10 px-4 text-center animate-in fade-in slide-in-from-bottom-6 fill-mode-both delay-[2400ms] duration-1000 ease-out"
+          className="absolute inset-x-0 z-10 flex -translate-y-1/2 justify-center px-4 animate-in fade-in zoom-in-95 duration-1000 ease-out"
+          style={{ top: `${wavesMiddle(layout)}%` }}
         >
           <p
-            className="font-display text-[clamp(30px,4.4vw,88px)] leading-tight font-bold tracking-tight text-transparent"
+            className="font-display text-[clamp(24px,3.4vw,68px)] leading-tight font-bold tracking-tight"
             style={{
-              backgroundImage: "linear-gradient(90deg, hsl(358 96% 62%), hsl(322 95% 66%), hsl(214 98% 62%))",
-              backgroundClip: "text",
-              WebkitBackgroundClip: "text",
-              filter: "drop-shadow(0 0 1.2vw hsl(322 95% 68% / 0.45))",
+              background: "hsl(var(--background) / 0.55)",
+              borderRadius: 9999,
+              padding: "0.2em 0.9em",
+              boxShadow: "0 0 2.4vw hsl(322 95% 62% / 0.35)",
             }}
           >
-            Your song is ready!
-          </p>
-          <p className="mx-auto mt-[1.2vh] max-w-[70vw] text-[clamp(14px,1.5vw,30px)] text-muted-foreground">
-            Two hearts met, fell into the same rhythm, and wrote this song together.
+            <span
+              className="text-transparent"
+              style={{
+                backgroundImage: "linear-gradient(90deg, hsl(358 96% 62%), hsl(322 95% 66%), hsl(214 98% 62%))",
+                backgroundClip: "text",
+                WebkitBackgroundClip: "text",
+              }}
+            >
+              Your song is ready!
+            </span>
           </p>
         </div>
       )}
